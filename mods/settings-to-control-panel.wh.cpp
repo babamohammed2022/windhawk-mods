@@ -29,7 +29,7 @@ corresponding classic Control Panel applets using only native Windows components
 - Redirects numerous `ms-settings:` URIs to classic Control Panel
 - Anti-loop protection
 - Configurable fallback modes
-- **NEW in 10.0.2: Option to redirect Audio & Network system tray icons to classic panels**
+- **NEW in 10.0.2: Option to redirect Audio & Network system tray icons to classic panels (Tested on Windows 10 21H2)**
 
 ---
 
