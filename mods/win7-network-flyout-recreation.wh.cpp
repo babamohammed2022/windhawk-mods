@@ -130,6 +130,33 @@ If any issues are encountered, please report them to the author of the mod.
 */
 // ==/WindhawkModSettings==
 // ## Changelog
+// - 5.0.0: The tray-info window (used to publish the network tray icon to a
+//   RetroBar instance of this mod, and to receive TaskbarCreated on the
+//   hotkey thread) is now a real, never-shown top-level window instead of an
+//   HWND_MESSAGE window. HWND_MESSAGE windows never receive HWND_BROADCAST
+//   messages, and TaskbarCreated is broadcast; before the flyout had ever
+//   been opened, this was the hotkey thread's only window, so the thread
+//   could never observe an in-process taskbar recreation (ExplorerPatcher
+//   settings changes, a taskbar restart, tray churn) and would fail to
+//   reinstall tray interception afterwards.
+// - 5.0.0: The "Connect automatically" checkbox state is now captured on the
+//   flyout's UI thread (where it is guaranteed to still be alive) instead of
+//   being read from the connect worker thread via a blocking, untimed
+//   cross-thread SendMessageW while holding the connect mutex - which could
+//   silently turn auto-connect off if the flyout had already been closed,
+//   and risked an unload stall if the UI thread ever stopped pumping.
+// - 5.0.0: The WLAN notification callback is now explicitly deregistered
+//   (WlanRegisterNotification with WLAN_NOTIFICATION_SOURCE_NONE) before
+//   WlanCloseHandle during cleanup, instead of relying on WlanCloseHandle to
+//   synchronously drain an in-flight callback, which is not a documented
+//   guarantee and could otherwise still be running mod code - or blocked on
+//   a critical section about to be deleted - while Windhawk unmaps the DLL.
+// - 5.0.0: Wh_ModUninit now marks teardown as started (in both the Explorer/
+//   RetroBar and the control.exe branch) before joining the NetCenter
+//   refresh thread, and the NetCenter refresh worker now refuses to start if
+//   teardown has begun. This closes a narrow window where a Network-Center
+//   page thread could still start a new, unjoined worker thread after the
+//   previous one had already been joined.
 // - 5.0.0: Network and Sharing Center map rebuilt on the layout of Windows
 //   7's own netcenter.dll UIFILE: a fixed 480rp map (40rp gutters, five
 //   80rp icon/connector cells, three 160rp label cells - the geometry the
@@ -2304,6 +2331,14 @@ typedef struct {
     DOT11_CIPHER_ALGORITHM cipherAlgorithm;
     DOT11_MAC_ADDRESS bssid;
     BOOL hasBssid;
+    // Captured on the flyout (UI) thread in AskForPasswordAndConnect, where
+    // g_hWndCheckboxConnect is guaranteed to still be alive. Reading the
+    // checkbox from the worker thread instead (via a blocking, untimed
+    // cross-thread SendMessageW while holding g_hConnectMutex) would return
+    // 0/FALSE if the flyout had already been closed/destroyed by the time the
+    // worker got here (g_hWndCheckboxConnect is cleared in WM_DESTROY), and
+    // could stall unload if the UI thread is gone or not pumping.
+    BOOL autoConnect;
 } AsyncConnectContext;
 
 // -------------------------------------------------------
@@ -5861,8 +5896,15 @@ static unsigned int __stdcall AsyncConnectThreadProc(void* pParam) {
     
     if (ctx->isSecured && !ctx->hasProfile) {
         WCHAR xmlProfile[2048] = {0};
-        BOOL autoConn = (SendMessageW(g_hWndCheckboxConnect, BM_GETCHECK, 0, 0) == BST_CHECKED);
-        
+        // Captured on the UI thread in AskForPasswordAndConnect - see the
+        // comment on AsyncConnectContext::autoConnect. Do NOT read
+        // g_hWndCheckboxConnect here: this runs on the worker thread while
+        // holding g_hConnectMutex, and a blocking, untimed cross-thread
+        // SendMessageW into a UI thread that may already be gone (or not
+        // pumping) risks an unload stall, and silently yields FALSE if the
+        // flyout was closed before we got here.
+        BOOL autoConn = ctx->autoConnect;
+
         WifiNetworkItem tempItem = {{0}};
         StringCchCopyW(tempItem.ssid, ARRAYSIZE(tempItem.ssid), ctx->ssid);
         tempItem.isSecured = ctx->isSecured;
@@ -5971,6 +6013,11 @@ static BOOL AskForPasswordAndConnect(int index) {
     if (item.hasBssid) {
         CopyMemory(ctx->bssid, item.bssid, sizeof(DOT11_MAC_ADDRESS));
     }
+    // Capture the "Connect automatically" checkbox state here, on the
+    // flyout's UI thread, where g_hWndCheckboxConnect is guaranteed to still
+    // be alive - see the comment on AsyncConnectContext::autoConnect.
+    ctx->autoConnect = (g_hWndCheckboxConnect && IsWindow(g_hWndCheckboxConnect) &&
+                        SendMessageW(g_hWndCheckboxConnect, BM_GETCHECK, 0, 0) == BST_CHECKED);
     BOOL needsPassword = (item.isSecured && !item.hasProfile);
     if (needsPassword) {
         WCHAR password[65] = {0};
@@ -6725,8 +6772,10 @@ static BOOL QueryToolbarNetworkIconRect(HWND hToolbar, RECT* outRect) {
 // RetroBar instance rediscover the same data cross-process - which needed an
 // OpenProcess(PROCESS_VM_WRITE) handle on explorer.exe, VirtualAllocEx and
 // ReadProcessMemory, all of which AV/EDR products flag - the Explorer instance
-// answers a registered query message on a message-only window, and the
-// RetroBar instance simply asks (see RetroBarTray::QueryExplorerForNetworkIcon).
+// answers a registered query message on an invisible top-level window (see
+// CreateTrayInfoWindow - it must be a real top-level window, not
+// HWND_MESSAGE, so it can also receive the broadcast TaskbarCreated message),
+// and the RetroBar instance simply asks (see RetroBarTray::QueryExplorerForNetworkIcon).
 // wParam selects the field, the answer is the LRESULT (0 = unknown / no
 // network icon in this explorer.exe).
 static const PCWSTR kTrayInfoClassName = L"Win7NetFlyout_TrayInfoWnd";
@@ -6823,16 +6872,31 @@ static void CreateTrayInfoWindow() {
         g_trayInfoClassRegistered = true;
     }
     UINT queryMsg = GetQueryNetworkIconMessage();
-    g_hTrayInfoWnd = CreateWindowExW(0, kTrayInfoClassName, L"", 0, 0, 0, 0, 0,
-                                     HWND_MESSAGE, NULL, hInst, NULL);
+    // Note: this window is intentionally a real (never-shown) top-level
+    // window - WS_POPUP with WS_EX_TOOLWINDOW to keep it out of the taskbar
+    // and alt-tab - rather than an HWND_MESSAGE window. HWND_MESSAGE windows
+    // never receive HWND_BROADCAST messages (documented behavior), and
+    // TaskbarCreated is broadcast; before the flyout has ever been opened,
+    // this window is the hotkey thread's only window, so with HWND_MESSAGE
+    // the thread could never observe TaskbarCreated and would fail to
+    // reinstall tray interception after an in-process taskbar recreation
+    // (ExplorerPatcher settings changes, a taskbar restart, tray churn).
+    g_hTrayInfoWnd = CreateWindowExW(WS_EX_TOOLWINDOW, kTrayInfoClassName, L"",
+                                     WS_POPUP, 0, 0, 0, 0,
+                                     NULL, NULL, hInst, NULL);
     if (!g_hTrayInfoWnd) {
         Wh_Log(L"TrayInfo: CreateWindowExW failed (%lu)", GetLastError());
         return;
     }
     // UIPI blocks registered messages from a lower-integrity sender; let a
-    // non-elevated RetroBar query an elevated explorer.exe as well.
+    // non-elevated RetroBar query an elevated explorer.exe as well. The same
+    // applies to TaskbarCreated itself when this host can be elevated
+    // relative to whatever (re)created the taskbar.
     if (queryMsg)
         ChangeWindowMessageFilterEx(g_hTrayInfoWnd, queryMsg, MSGFLT_ALLOW, NULL);
+    UINT taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
+    if (taskbarCreatedMsg)
+        ChangeWindowMessageFilterEx(g_hTrayInfoWnd, taskbarCreatedMsg, MSGFLT_ALLOW, NULL);
 }
 
 static void DestroyTrayInfoWindow() {
@@ -8836,7 +8900,7 @@ static BOOL QueryExplorerForNetworkIcon() {
     };
     BOOL sawPublisher = FALSE;
     HWND hInfo = NULL;
-    while ((hInfo = FindWindowExW(HWND_MESSAGE, hInfo, kTrayInfoClassName, NULL)) != NULL) {
+    while ((hInfo = FindWindowExW(NULL, hInfo, kTrayInfoClassName, NULL)) != NULL) {
         sawPublisher = TRUE;
         DWORD_PTR rHwnd = 0, rMsg = 0, rUid = 0, rVer = 0;
         if (!Ask(hInfo, TRAYINFO_HWND, &rHwnd) || !rHwnd) continue;
@@ -9550,7 +9614,9 @@ DWORD WINAPI HotkeyThreadProc(LPVOID lpParam) {
 }
 
 void SafeCleanup() {
-    if (InterlockedExchange(&g_Ctx.isUninitializing, 1L)) return;
+    // g_Ctx.isUninitializing is set by Wh_ModUninit before this is called
+    // (guarded there against re-entry); nothing else calls SafeCleanup, so
+    // no additional guard is needed here.
     RemoveTrayInterception();
     if (g_Ctx.dwHotkeyThreadId) PostThreadMessageW(g_Ctx.dwHotkeyThreadId, WM_QUIT, 0, 0);
     if (g_Ctx.hHotkeyThread) {
@@ -9614,7 +9680,19 @@ void SafeCleanup() {
         CloseHandle(g_hProfileDialogThread);
         g_hProfileDialogThread = NULL;
     }
-    if (g_Ctx.hWlanClient) { WlanCloseHandle(g_Ctx.hWlanClient, NULL); g_Ctx.hWlanClient = NULL; }
+    if (g_Ctx.hWlanClient) {
+        // Explicitly deregister the notification callback before closing the
+        // handle. WlanNotificationCallback runs on a wlanapi-owned thread and
+        // takes g_Ctx.csLock, which Wh_ModUninit deletes shortly after this;
+        // relying on WlanCloseHandle to synchronously drain an in-flight
+        // callback is not a documented guarantee, and an in-flight callback
+        // could still be executing mod code (or blocked on the
+        // soon-to-be-deleted critical section) while Windhawk unmaps the DLL.
+        WlanRegisterNotification(g_Ctx.hWlanClient, WLAN_NOTIFICATION_SOURCE_NONE, TRUE,
+                                  NULL, NULL, NULL, NULL);
+        WlanCloseHandle(g_Ctx.hWlanClient, NULL);
+        g_Ctx.hWlanClient = NULL;
+    }
     ShutdownGdiPlusRendering();
     FreeSystemIcons();
     FreeGlobalFonts();
@@ -11456,7 +11534,7 @@ static DWORD WINAPI NcNetworkDataRefreshWorker(PVOID /*unused*/) {
 // thread happens to be rendering the page or handling a connectivity event.
 
 static void EnsureNetCenterNetworkDataFresh() {
-    if (g_ncSkipRefreshOnThisPass)
+    if (g_Ctx.isUninitializing || g_ncSkipRefreshOnThisPass)
         return;
 
     // Nothing live to show a fresher result to (no open NetCenter page, no
@@ -11837,6 +11915,23 @@ void Wh_ModSettingsChanged() {
 }
 
 void Wh_ModUninit() {
+    // Guards against Wh_ModUninit itself being re-entered/called twice.
+    // SafeCleanup() used to double as this guard via g_Ctx.isUninitializing,
+    // but that flag is now set unconditionally at the very top of this
+    // function (see below), so SafeCleanup() no longer needs, or performs,
+    // its own check-and-bail on it.
+    static volatile LONG s_modUninitEntered = 0;
+    if (InterlockedExchange(&s_modUninitEntered, 1L)) return;
+
+    // Must be set before the join below in every branch (including
+    // control.exe, which previously never set this flag at all): a
+    // Network-Center page thread can still be pumping a previously-posted
+    // refresh message in the narrow window between the join and
+    // TeardownNetCenterHost(), and EnsureNetCenterNetworkDataFresh() checks
+    // this flag to refuse spinning up a new, unjoined worker thread that
+    // would still be running inside the mod image when Windhawk unmaps it.
+    InterlockedExchange(&g_Ctx.isUninitializing, 1L);
+
     if (Win7NetworkCenterLinks::g_ncRefreshThread) {
         // Was bounded to 5s; NcNetworkDataRefreshWorker's worst case
         // (WlanEnumInterfaces + WlanGetNetworkBssList per network +
