@@ -1,6 +1,6 @@
 // ==WindhawkMod==
 // @id             win7-logoff-screen-restorer
-// @name           Windows Vista/7 Logoff/Shutdown Screen Restorer
+// @name           Windows Vista/7 Logoff Screen Restorer
 // @description    This mod restores the classic Windows Vista/7 full-screen "programs still need to close" logoff and shutdown screen for Windows 10 and 11
 // @version        1.0.0
 // @author         babamohammed
@@ -20,86 +20,66 @@
 /*
 # Windows Vista/7 Logoff Screen Restorer
 
-## Overview
+This mod restores the classic Windows Vista/7 screen that shows up when logging off,
+shut down, or restart while programs are still open (the one with the dimmed
+desktop, the list of running programs, and the "Force log off"/"Cancel"
+buttons)
 
-This mod restores the classic full-screen logoff/shutdown experience from Windows 7 on Windows 10 and 11. The user will see the dimmed desktop, a heading showing how many programs are still running, a list of those programs with their icons, and the familiar "Force log off" and "Cancel" buttons.
+The files on the system are not modified. The mod just shows this screen right
+before Windows does the actual shutdown/restart/logoff. After clicking "Force log off"/"Force shutdown", Windows continues as normal.
 
-It does **not** modify any system files (like winlogon.exe or LogonUI.exe). Instead, it shows a visual prompt before Windows proceeds with the actual shutdown. Once "Force log off" is clicked, Windows continues its normal shutdown sequence.
-
----
-
-## Screenshots 
+## Screenshots
 
 ![Windows 7 Logoff](https://raw.githubusercontent.com/babamohammed2022/babamohammed2022/main/win7logoff.PNG)
 
 ![Windows Vista Logoff](https://raw.githubusercontent.com/babamohammed2022/babamohammed2022/main/winvistalogoff.PNG)
 
-## Key Features
+## Features
 
-- **Accurate Windows Vista/7 style list**: Shows the total number of open programs (no artificial cap) and displays as many as fit on screen, with a scrollbar for the rest.
-- **Adaptive layout**: The panel resizes based on the number of programs. When space is tight, it uses smaller icons and rows to fit more entries before scrolling.
-- **Priority to unresponsive programs**: Programs that are not responding are detected and moved to the top, with a clear "This program is not responding." note.
-- **Live updates**: The list refreshes every second, so entries disappear and the counter updates as programs close on their own.
-- **Works for logoff, shutdown, and restart**: Hooks into both `ExitWindowsEx` and `InitiateShutdownW`, covering the Start menu, Win+X, Alt+F4, and Task Manager.
-- **Smart skipping**: If no programs are running, the screen is bypassed entirely. If the last program closes while the screen is visible, it dismisses itself automatically.
-- **Full mouse and keyboard support**: Scroll with the wheel, drag the thumb, click the track, or use arrow keys, Page Up/Down, Home, and End.
-- **Two visual skins**: The mods allows to choose between **Windows 7** (with blue Aero glass) and **Windows Vista** (with a red power button). Switch anytime via settings; changes apply instantly.
-- **Action-aware wording**: All text (heading, notes, buttons) adapts to logoff, shutdown, or restart, in all 21 supported languages.
-- **Built-in translations**: The interface is fully localised in 21 languages. The user can also manually select a preferred language, independent of the system locale.
-- **Easy on/off toggle**: The mod can be disabled entirely via the **Enable the custom screen** setting, without uninstalling. If disabled while active, the screen closes and the action continues.
-- **Clean filtering**: System processes (lock screen, Start menu, search, etc.) are never listed, and each program appears only once regardless of how many windows it has.
-- **100% reversible**: Only two user-mode hooks are installed. Disabling the mod (via Windhawk or the internal setting) removes it completely and there are not registry or system changes.
+- The mod shows every open program in a scrollable list, with icons just like Windows Vista/7 did.
+- If nothing is open, the screen doesn't show up at all and the system goes straight to shutdown.
+- The mod includes two skins to choose in the settings: **Windows 7** (blue Aero) or **Windows Vista** (red button) and the changes apply instantly.
+- The mod is translated into 21 languages, matched automatically the system language (or pick one manually in settings).
 
-The mod has been tested on Windows 10 21H2, Windows 11 24H2 and Windows 11 25H2.
+The mod has been tested on Windows 10 21H2, Windows 11 24H2, and Windows 11 25H2.
+
 ---
 
-## Preview Shortcut
+## Try it without logging off
 
-The screen can be tested without logging off by pressing `Ctrl+Alt+Shift+L` (while the mod is enabled). The shortcut can be changed or disabled in settings. Note that `Win+L` is reserved by Windows and cannot be used.
+To try the mod without logging off, it is recommended to press `Ctrl+Alt+Shift+L` any time (while the mod is enabled) to preview the screen. You can change or disable this shortcut in settings. `Win+L` can't be used — Windows reserves it for locking the PC.
 
 ---
 
 ## Requirements
 
-- **Windows 10 or Windows 11** (64-bit)
+- Windows 10 or Windows 11 (64 bit)
 
 ---
 
-## Safety & Design
+## Safety Notes
 
-- A 60-second watchdog dismisses the screen and lets the logoff continue normally (it never force-closes apps), so it can neither block a logoff nor destroy unsaved work.
-- The full screen spans every monitor; the panel and its metrics are centred on and
-  scaled per the monitor that holds the foreground window, falling back to the cursor
-  and then the primary monitor. It never straddles a bezel on a multi-monitor setup.
-- All operations (enumeration, painting, hooks) are wrapped to fall back safely to normal shutdown in case of errors.
-- Conservative filters skip invisible, owned, tool, or system windows, and deduplicate entries by process ID.
-- A safety limit prevents unbounded icon allocation; the total count remains accurate even if the list is truncated.
-- The backdrop (captured desktop + dim veil) is composited once into a cached bitmap
-  rather than rebuilt on every repaint, and mouse hot-tracking invalidates only the
-  dirty button, so a mouse move does not re-render the whole virtual desktop.
-- The interface is drawn off-screen and blitted in one go, eliminating flicker and keeping hit-testing perfectly aligned.
+- If the screen is ever left open too long, the mod closes it automatically after 60 seconds and lets the logoff/shutdown continue and it never forces programs to close on its own and never destroys unsaved work.
+- The mod only shows a visual screen and it doesn't touch any system files or settings, and doesn't write anything to the registry.
+- Turning the mod off (from Windhawk or from its own settings) removes it completely.
 
 ---
 
-## Known Limitations
+## Good to know
 
-- Only intercepts shutdown requests via `ExitWindowsEx` or `InitiateShutdownW` in shell processes. Direct `NtShutdownSystem` calls or service-initiated shutdowns are bypassed by design.
-- If the Start menu button does not trigger the screen, ensure StartMenuExperienceHost.exe is not excluded in Windhawk's process list (note: portable mode may prevent injection).
-- This is a visual prompt, not a full secure-desktop replacement (that would require patching Winlogon/LogonUI).
-- A program with unsaved work but still responding is listed as normal; only hung windows are flagged as blocking.
-- "Force" applies the cautious `EWX_FORCEIFHUNG` only, so a healthy app that vetoes
-  `WM_QUERYENDSESSION` is **not** force-closed and Windows' own modern "app is preventing
-  shutdown" screen appears right after this mod's screen. This is intentional: the mod
-  never destroys unsaved work.
+- This only catches shutdowns started the normal way (Start menu, Alt+F4, Task Manager, etc.). It won't appear for shutdowns triggered directly by Windows internals or by another program/service.
+- If clicking Shut Down from the Start menu doesn't show the screen, make sure `StartMenuExperienceHost.exe` isn't excluded in Windhawk's process list.
+- This screen is a visual step before shutdown, not a security screen — it doesn't replace the Windows lock/login screen.
+- "Force log off" only force-closes programs that have actually stopped responding. A program that's still running but has unsaved work is left alone, exactly like in the original Windows 7 behavior, so unsaved work should never be lost.
 
 ---
 
-## Credits 
-- Cips - Testing on Windows 11 25H2
+## Credits
+- Cips — testing on Windows 11 25H2
 
 ---
 
-If any issues are encountered, please report them to the mod's author.
+For any suggestions or problems it is recommended to contact the author of this modification.
 */
 // ==/WindhawkModReadme==
 
@@ -123,7 +103,7 @@ If any issues are encountered, please report them to the mod's author.
   $name: Language
   $description: >-
     This setting picks the language of every string on the screen. This
-    setting, on "Automatic", follows the Windows user locale and falls back
+    setting, on "Automatic", the mod follows the Windows user locale and falls back
     to English if unsupported. This setting never changes the wording's match
     to the action taking place (log off, shut down or restart).
   $options:
@@ -496,7 +476,7 @@ static constexpr UINT WM_APP_QUITUI       = WM_APP + 3;
 // or reordered relative to the writes.
 static std::atomic<HWND>  g_hotkeyWindow{nullptr};  // message-only control window (UI thread)
 static std::atomic<DWORD> g_uiThreadId{0};
-static HANDLE g_uiThread = nullptr;   // only ever written from StartUiThreadOnce/Wh_ModUninit
+static std::atomic<HANDLE> g_uiThread{nullptr};   // written from StartUiThreadOnce/Wh_ModUninit, read from SignalUiThreadQuit
 static bool   g_isExplorer = false;       // only explorer registers the preview hotkey
 
 // Set while the control window exists; the UI thread clears it just before it
@@ -2845,7 +2825,7 @@ void Wh_ModSettingsChanged() {
 // message loop and PostThreadMessageW cannot fail for lack of a queue (see
 // the priming PeekMessageW at the top of UiThreadProc).
 static void SignalUiThreadQuit() {
-    if (!g_uiThread) return;   // never started (or never even attempted) -- nothing to signal
+    if (!g_uiThread.load(std::memory_order_acquire)) return;   // never started (or never even attempted) -- nothing to signal
     WaitForSingleObject(g_uiReady, INFINITE);
     DWORD tid = g_uiThreadId.load(std::memory_order_acquire);
     if (tid) PostThreadMessageW(tid, WM_APP_QUITUI, 0, 0);
@@ -2874,13 +2854,22 @@ void Wh_ModUninit() {
     //    hook and it proceeds immediately.
     WaitForSingleObject(g_hooksIdle, INFINITE);
 
+    // 2b. A hook thread that was still in flight when step 1 ran may have
+    //     called StartUiThreadOnce (and created g_uiThread) *after* that
+    //     first SignalUiThreadQuit already saw g_uiThread == nullptr and gave
+    //     up. g_hooksIdle is now signalled, so no hook can be in that window
+    //     any more and g_uiThread (if it exists) has its final value -- signal
+    //     once more so a UI thread created that late still gets its quit
+    //     message instead of parking in GetMessageW forever.
+    SignalUiThreadQuit();
+
     // 3. Join the UI thread INFINITE. A bounded wait that gives up and lets
     //    Windhawk FreeLibrary the image while the thread is still inside mod
     //    code (or blocked in GetMessage with a return address in it) crashes
     //    the host process.
-    if (g_uiThread) {
-        WaitForSingleObject(g_uiThread, INFINITE);
-        CloseHandle(g_uiThread);
+    if (HANDLE uiThread = g_uiThread.load(std::memory_order_acquire)) {
+        WaitForSingleObject(uiThread, INFINITE);
+        CloseHandle(uiThread);
         g_uiThread = nullptr;
     }
     g_hotkeyWindow = nullptr;
