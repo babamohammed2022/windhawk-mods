@@ -54,7 +54,8 @@ The manager owns the host creation, but on some builds it gives up with an error
 before it calls either factory, and then no host is created at all. In that case
 the mod creates the Windows 10 host directly, and after a few failures in a row
 it stops routing for the rest of the session so that the stock Windows 11
-switcher keeps working.
+switcher keeps working. The calls to the host factories are counted, so that the
+fallback can tell whether the manager reached a factory before it gave up.
 
 ## Notes
 
@@ -136,15 +137,25 @@ static void* g_createXamlAddress = nullptr;
 static void* g_gateAddress = nullptr;
 static void* g_createMtvHostAddress = nullptr;
 
-// The DirectComposition factory is called directly; the other two are hooked.
+// g_createDcompHost is either the trampoline of the counting hook below or the
+// address of the factory itself, whichever is available.
 static CreateHostFn g_createDcompHost = nullptr;
+static CreateHostFn g_createDcompHostOriginal = nullptr;
 static CreateHostFn g_createXamlHostOriginal = nullptr;
 static IsUndockedAssetAvailableFn g_isUndockedAssetAvailableOriginal = nullptr;
 static CreateMtvHostFn g_createMtvHostOriginal = nullptr;
 
 // Counts the calls that reached one of the two host factories, so that the
-// safety net can tell whether the manager gave up before calling either of them.
+// safety net can tell whether the manager gave up before calling either of
+// them. The DirectComposition factory is counted by its own hook: the manager
+// can call it directly through the gate, and such a call has to be visible
+// here, otherwise the safety net would call the same factory a second time
+// right after it failed.
 static std::atomic<unsigned long long> g_factoryEntries{0};
+
+// Set only when the safety net is armed in a state where every call to a host
+// factory is visible in g_factoryEntries.
+static std::atomic<bool> g_safetyNetEnabled{false};
 
 static std::atomic<bool> g_routingEnabled{false};
 static std::atomic<bool> g_stopping{false};
@@ -240,6 +251,7 @@ static HRESULT WINAPI CreateMtvHostHook(void* self,
         : E_FAIL;
 
     if (kind == kAltTabHostKind && result == E_UNEXPECTED && IsRouting() &&
+        g_safetyNetEnabled.load(std::memory_order_acquire) &&
         g_createDcompHost && viewId && output && !*output &&
         g_factoryEntries.load(std::memory_order_relaxed) == entriesBefore) {
         Wh_Log(L"_CreateMTVHost gave up before either host factory; creating the DirectComposition host directly");
@@ -585,11 +597,14 @@ static void ResolveBySymbols() {
 ////////////////////////////////////////////////////////////////////////////////
 
 static bool InstallGateHook() {
+    // Not resolved on this build; already reported by the resolution log.
+    if (!g_gateAddress) {
+        return false;
+    }
     if (g_isUndockedAssetAvailableOriginal) {
         return true;
     }
-    if (!g_gateAddress ||
-        !WindhawkUtils::SetFunctionHook(
+    if (!WindhawkUtils::SetFunctionHook(
             reinterpret_cast<IsUndockedAssetAvailableFn>(g_gateAddress),
             IsUndockedAssetAvailableHook,
             &g_isUndockedAssetAvailableOriginal)) {
@@ -601,8 +616,10 @@ static bool InstallGateHook() {
 }
 
 static bool InstallXamlHook() {
-    if (!g_createXamlAddress ||
-        !WindhawkUtils::SetFunctionHook(
+    if (!g_createXamlAddress) {
+        return false;
+    }
+    if (!WindhawkUtils::SetFunctionHook(
             reinterpret_cast<CreateHostFn>(g_createXamlAddress),
             CreateXamlHostHook, &g_createXamlHostOriginal)) {
         Wh_Log(L"The XAML host factory couldn't be hooked");
@@ -613,12 +630,40 @@ static bool InstallXamlHook() {
 }
 
 static bool InstallMtvHostHook() {
-    if (!g_createMtvHostAddress ||
-        !WindhawkUtils::SetFunctionHook(
+    if (!g_createMtvHostAddress) {
+        return false;
+    }
+    if (!WindhawkUtils::SetFunctionHook(
             reinterpret_cast<CreateMtvHostFn>(g_createMtvHostAddress),
             CreateMtvHostHook, &g_createMtvHostOriginal)) {
         Wh_Log(L"The host manager couldn't be hooked");
         g_createMtvHostOriginal = nullptr;
+        return false;
+    }
+    return true;
+}
+
+// A pass-through hook that only counts the calls to the DirectComposition
+// factory, so that the safety net can see the calls that the manager makes
+// through the gate. The mod calls the factory through the trampoline, so the
+// count stays the manager's alone.
+static HRESULT WINAPI CreateDcompHostHook(void* self,
+                                          unsigned int kind,
+                                          ULONG_PTR arg3,
+                                          ULONG_PTR arg4,
+                                          void** output) {
+    g_factoryEntries.fetch_add(1, std::memory_order_relaxed);
+    return g_createDcompHostOriginal
+        ? g_createDcompHostOriginal(self, kind, arg3, arg4, output)
+        : E_FAIL;
+}
+
+static bool InstallDcompCountingHook() {
+    if (!g_createDcompAddress ||
+        !WindhawkUtils::SetFunctionHook(
+            reinterpret_cast<CreateHostFn>(g_createDcompAddress),
+            CreateDcompHostHook, &g_createDcompHostOriginal)) {
+        g_createDcompHostOriginal = nullptr;
         return false;
     }
     return true;
@@ -904,41 +949,61 @@ BOOL Wh_ModInit() {
     // The gate is what makes the shell pick the Windows 10 host, and the
     // redirect covers the call sites that go straight to the XAML factory. The
     // redirect is only useful, and only safe, together with the gate; the
-    // safety net needs the DirectComposition factory. If none of that could be
-    // resolved, the mod stays inactive and says what was missing instead of
-    // leaving Alt+Tab in a state that is worse than the stock switcher.
-    const bool hasGate = g_gateAddress != nullptr;
+    // safety net needs the DirectComposition factory. The installation results
+    // are checked, so that the mod can't announce a route that isn't there.
     const bool hasPair =
         g_createDcompAddress != nullptr && g_createXamlAddress != nullptr;
-    const bool hasSafetyNet =
+    const bool hasManager =
         g_createMtvHostAddress != nullptr && g_createDcompAddress != nullptr;
 
-    if (!hasGate && !hasSafetyNet) {
-        Wh_Log(L"The Alt+Tab entry points of twinui.pcshell.dll couldn't be resolved (gate: %s, host factories: %s); the mod isn't activated and Alt+Tab is left as it is",
-               hasGate ? L"found" : L"not found",
-               hasPair ? L"found" : L"not found");
+    const bool gateHook = InstallGateHook();
+    const bool redirectHook = gateHook && hasPair && InstallXamlHook();
+    const bool managerHook = hasManager && InstallMtvHostHook();
+
+    if (!g_createDcompHost && g_createDcompAddress) {
+        g_createDcompHost = reinterpret_cast<CreateHostFn>(g_createDcompAddress);
+    }
+
+    // The safety net fires only when the call it makes wasn't already made by
+    // the manager, so it is armed only while the calls to the factories are
+    // visible in g_factoryEntries. The counting hook on the DirectComposition
+    // factory provides that; without it, the net is armed only when the gate
+    // itself isn't available, which is the Windows 11 24H2 case above - there
+    // the manager doesn't reach a factory at all and the net is the only
+    // mechanism that restores the switcher.
+    if (managerHook && InstallDcompCountingHook()) {
+        g_createDcompHost = g_createDcompHostOriginal;
+        g_safetyNetEnabled.store(true, std::memory_order_release);
+    } else if (managerHook && !gateHook) {
+        Wh_Log(L"The DirectComposition factory couldn't be hooked for counting; the safety net is armed anyway, because without the gate it is the only mechanism on this build");
+        g_safetyNetEnabled.store(true, std::memory_order_release);
+    } else if (managerHook) {
+        Wh_Log(L"The DirectComposition factory couldn't be hooked for counting; the safety net stays disarmed, because the manager may have called the factory already");
+    }
+
+    // A working route is either the gate with the redirect, or the safety net.
+    // The gate alone is not enough: call sites that go straight to the XAML
+    // factory would still create the Windows 11 host.
+    const bool hasRoute =
+        (gateHook && redirectHook) ||
+        g_safetyNetEnabled.load(std::memory_order_acquire);
+
+    if (!hasRoute) {
+        Wh_Log(L"No working route to the Windows 10 Alt+Tab host could be installed (gate: %s, XAML to DirectComposition redirect: %s, host manager safety net: %s); the mod isn't activated and Alt+Tab is left as it is",
+               gateHook ? L"hooked" : L"not available",
+               redirectHook ? L"hooked" : L"not available",
+               g_safetyNetEnabled.load(std::memory_order_acquire) ? L"armed"
+                                                                 : L"not available");
         FreeLibrary(g_twinuiModule);
         g_twinuiModule = nullptr;
         return FALSE;
     }
 
-    if (g_createDcompAddress) {
-        g_createDcompHost = reinterpret_cast<CreateHostFn>(g_createDcompAddress);
-    }
-    if (hasGate) {
-        InstallGateHook();
-    }
-    if (hasGate && hasPair) {
-        InstallXamlHook();
-    }
-    if (hasSafetyNet) {
-        InstallMtvHostHook();
-    }
-
     Wh_Log(L"Routing ready (gate: %s, XAML to DirectComposition redirect: %s, host manager safety net: %s)",
-           g_isUndockedAssetAvailableOriginal ? L"hooked" : L"not available",
-           g_createXamlHostOriginal ? L"hooked" : L"not available",
-           g_createMtvHostOriginal ? L"armed" : L"not available");
+           gateHook ? L"hooked" : L"not available",
+           redirectHook ? L"hooked" : L"not available",
+           g_safetyNetEnabled.load(std::memory_order_acquire) ? L"armed"
+                                                             : L"not available");
     g_routingEnabled.store(true, std::memory_order_release);
     return TRUE;
 }
@@ -947,6 +1012,7 @@ BOOL Wh_ModInit() {
 void Wh_ModBeforeUninit() {
     g_stopping.store(true, std::memory_order_release);
     g_routingEnabled.store(false, std::memory_order_release);
+    g_safetyNetEnabled.store(false, std::memory_order_release);
 }
 
 void Wh_ModUninit() {
