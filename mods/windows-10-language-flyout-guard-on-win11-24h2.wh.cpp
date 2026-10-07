@@ -6,7 +6,7 @@
 // @author          babamohammed
 // @github          https://github.com/babamohammed2022
 // @architecture    x86-64
-// @compilerOptions -ladvapi32 -lcomctl32 -lgdi32 -luser32
+// @compilerOptions -ladvapi32 -lcomctl32 -lgdi32 -lmsimg32 -luser32
 // @include         explorer.exe
 // @exclude         %SystemRoot%\explorer.exe
 // ==/WindhawkMod==
@@ -941,7 +941,14 @@ static void PaintIndicatorCell(HWND hwnd, const wchar_t* why, HDC targetDc) {
         g_unloading.load(std::memory_order_acquire)) {
         return;
     }
-    BitBlt(targetDc, 0, 0, width, height, memoryDc.get(), 0, 0, SRCCOPY);
+    // This DIB contains premultiplied per-pixel alpha. BitBlt copies its RGB
+    // channels opaquely and can reintroduce a solid/incorrect taskbar-colour box;
+    // AlphaBlend preserves the transparent pixels around the glyphs.
+    const BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    if (!AlphaBlend(targetDc, 0, 0, width, height,
+                    memoryDc.get(), 0, 0, width, height, blend)) {
+        return;
+    }
 
     const int logIndex = g_indicatorCellLogs.fetch_add(1, std::memory_order_relaxed);
     if (logIndex < 40) {
