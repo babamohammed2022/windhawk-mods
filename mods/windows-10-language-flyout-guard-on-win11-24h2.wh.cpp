@@ -6,7 +6,7 @@
 // @author          babamohammed
 // @github          https://github.com/babamohammed2022
 // @architecture    x86-64
-// @compilerOptions -ladvapi32 -lcomctl32 -lgdi32 -lmsimg32 -luser32
+// @compilerOptions -ladvapi32 -lcomctl32 -lgdi32 -luser32
 // @include         explorer.exe
 // @exclude         %SystemRoot%\explorer.exe
 // ==/WindhawkMod==
@@ -18,39 +18,11 @@
 This mod addresses two issues that can occur when the private Windows 10 shell is used by the Windows 10 taskbar mod on Windows 11 24H2 and later:
 
 - **A language flyout that opens at startup.** For a limited time after the shell starts, the mod suppresses known language-switcher window classes in this Explorer process. It does not enumerate or hide windows owned by other processes. Clicking the language indicator manually is allowed through the guard.
-- **The language indicator's orientation and appearance.** The optional colour feature reads the active layout from the foreground thread and draws the full keyboard-layout variant, so Italian (142) can display as `ITA 142` rather than `ITA IT`. The indicator is painted by one theme-aware painter; Explorer's legacy paint is not forwarded. State changes request repaint without a competing periodic repaint.
+- **The language indicator's orientation and appearance.** The optional colour feature uses one theme-aware painter for the indicator's client area and reads the full active keyboard-layout ID, so variants such as Italian (142) display as `ITA 142` rather than being collapsed to `ITA IT`. It handles paint itself rather than allowing Explorer's legacy grey fill to overwrite the composited background, and it repaints on hover, press, theme, and layout state changes.
 
 The guard lasts 20 seconds by default. Each intercepted flyout can extend it by 15 seconds, up to four times the configured duration. No window is closed or destroyed.
 
 The mod targets non-SystemRoot `explorer.exe` instances and limits the flyout sweep to the current process. System files are not replaced.
-
-## Screenshots
-
-### Before
-
-![Before](https://raw.githubusercontent.com/babamohammed2022/babamohammed2022/main/before.png)
-
-### After
-
-![After](https://raw.githubusercontent.com/babamohammed2022/babamohammed2022/main/after.png)
-
-## Settings
-
-| Setting | What it does |
-|---|---|
-| `LanguageGuard` (default on) | suppress known startup language flyouts in this Explorer process |
-| `LanguageGuardSeconds` (default 20) | initial guard duration; an intercepted flyout extends it by 15 seconds, up to four times this duration |
-| `LanguageIndicatorColours` (default on) | draw the active language and keyboard-layout variant (for example, `ITA 142`) with a theme-appropriate colour |
-| `LanguageIndicatorRightClickOpensTaskbarMenu` (default off) | route a right-click from the indicator to the taskbar context menu instead of its native menu |
-| `LogLanguageGuard` (default off) | log a one-time census of visible window classes and each matching suppression |
-
-## Indicator-fix overlap
-
-[Fix language indicator in Win10 taskbar under Win11 24H2+](https://windhawk.net/mods/fix-legacy-taskbar-tray-input-indicator) by Anixx and this mod can coexist as complementary taskbar customizations, but their indicator rendering overlaps rather than stacks. With `LanguageIndicatorColours` on, this mod owns the indicator paint and draws its text itself, so Anixx's mod is not needed for that indicator fix in this configuration. The user reports that both mods still work together in their setup without significant rendering problems; the overlap is not a general incompatibility.
-
-## The log
-
-With `LogLanguageGuard` on, the mod logs visible window classes when the guard starts and each matching window it suppresses, followed by a summary when the guard ends.
 */
 // ==/WindhawkModReadme==
 // ==WindhawkModSettings==
@@ -171,18 +143,29 @@ public:
     HKEY* put() { reset(); return &m_key; }
     HKEY get() const { return m_key; }
     void reset() { if (m_key) { RegCloseKey(m_key); m_key = nullptr; } }
+    bool valid() const { return m_key != nullptr; }
 private:
     HKEY m_key;
 };
 
-// Owns a generic kernel HANDLE (event, thread, ...).
+// Owns a generic kernel HANDLE (event, thread, ...). Move-only so it can be
+// returned from a factory while still guaranteeing release on every path.
 class ScopedHandle {
 public:
+    ScopedHandle() : m_h(nullptr) {}
     explicit ScopedHandle(HANDLE h) : m_h(h) {}
     ~ScopedHandle() { if (m_h) CloseHandle(m_h); }
     ScopedHandle(const ScopedHandle&) = delete;
     ScopedHandle& operator=(const ScopedHandle&) = delete;
+    ScopedHandle(ScopedHandle&& o) noexcept : m_h(o.m_h) { o.m_h = nullptr; }
+    ScopedHandle& operator=(ScopedHandle&& o) noexcept {
+        if (this != &o) { reset(); m_h = o.m_h; o.m_h = nullptr; }
+        return *this;
+    }
     HANDLE get() const { return m_h; }
+    HANDLE* put() { reset(); return &m_h; }
+    HANDLE release() { HANDLE h = m_h; m_h = nullptr; return h; }
+    void reset(HANDLE h = nullptr) { if (m_h && m_h != h) CloseHandle(m_h); m_h = h; }
     bool valid() const { return m_h != nullptr; }
 private:
     HANDLE m_h;
@@ -408,6 +391,8 @@ static void RunLanguageGuardCensus() {
 }
 
 // --- Language indicator tracking --------------------------------------------
+#define WM_APP_FORCE_INDICATOR_REPAINT (WM_APP + 0x51)
+
 static const DWORD_PTR kIndicatorSubclassRefData = 78;
 static constexpr int kMaxIndicatorTargets = 32;
 static SRWLOCK g_indicatorTargetsLock = SRWLOCK_INIT;
@@ -468,7 +453,8 @@ static void InvalidateIndicatorTargets() {
     const int count = CopyIndicatorTargets(targets, _countof(targets));
     for (int i = 0; i < count; i++) {
         if (IsOwnProcessWindow(targets[i]) && IsWindowVisible(targets[i])) {
-            InvalidateRect(targets[i], nullptr, FALSE);
+            RedrawWindow(targets[i], nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE);
         }
     }
 }
@@ -567,7 +553,6 @@ static void RemoveIndicatorSubclasses() {
         if (snapshot[i].subclassed && IsOwnProcessWindow(snapshot[i].wnd)) {
             WindhawkUtils::RemoveWindowSubclassFromAnyThread(
                 snapshot[i].wnd, IndicatorSubclassProc);
-            InvalidateRect(snapshot[i].wnd, nullptr, TRUE);
         }
     }
 
@@ -728,64 +713,6 @@ static bool FindKlidByLayoutId(WORD layoutId, wchar_t* out, size_t outCount) {
     return false;
 }
 
-// Cache each hardware Layout Id lookup (including misses). FindKlidByLayoutId
-// enumerates every installed keyboard-layout key, so it must never run on each
-// hover repaint. A small ring is sufficient for the few layouts a user cycles
-// between, and the lock keeps the registry scan from racing across paint threads.
-static constexpr int kLayoutIdCacheEntryCount = 16;
-struct LayoutIdCacheEntry {
-    WORD layoutId;
-    bool valid;
-    bool found;
-    wchar_t klid[KL_NAMELENGTH];
-};
-static SRWLOCK g_layoutIdCacheLock = SRWLOCK_INIT;
-static LayoutIdCacheEntry g_layoutIdCache[kLayoutIdCacheEntryCount] = {};
-static int g_layoutIdCacheNext = 0;
-
-static bool FindCachedKlidByLayoutId(WORD layoutId, wchar_t* out,
-                                     size_t outCount) {
-    if (!layoutId || !out || outCount < KL_NAMELENGTH) return false;
-
-    AcquireSRWLockShared(&g_layoutIdCacheLock);
-    for (const LayoutIdCacheEntry& entry : g_layoutIdCache) {
-        if (entry.valid && entry.layoutId == layoutId) {
-            const bool found = entry.found &&
-                               wcscpy_s(out, outCount, entry.klid) == 0;
-            ReleaseSRWLockShared(&g_layoutIdCacheLock);
-            return found;
-        }
-    }
-    ReleaseSRWLockShared(&g_layoutIdCacheLock);
-
-    // Serialize cache misses too, so two paint threads can't scan the same
-    // registry subtree at once.
-    AcquireSRWLockExclusive(&g_layoutIdCacheLock);
-    for (const LayoutIdCacheEntry& entry : g_layoutIdCache) {
-        if (entry.valid && entry.layoutId == layoutId) {
-            const bool found = entry.found &&
-                               wcscpy_s(out, outCount, entry.klid) == 0;
-            ReleaseSRWLockExclusive(&g_layoutIdCacheLock);
-            return found;
-        }
-    }
-
-    wchar_t resolved[KL_NAMELENGTH] = {};
-    const bool found = FindKlidByLayoutId(layoutId, resolved, _countof(resolved));
-
-    LayoutIdCacheEntry& entry = g_layoutIdCache[g_layoutIdCacheNext];
-    g_layoutIdCacheNext = (g_layoutIdCacheNext + 1) % kLayoutIdCacheEntryCount;
-    entry.layoutId = layoutId;
-    entry.valid = true;
-    entry.found = found;
-    entry.klid[0] = 0;
-    if (found) wcscpy_s(entry.klid, _countof(entry.klid), resolved);
-
-    const bool copied = found && wcscpy_s(out, outCount, resolved) == 0;
-    ReleaseSRWLockExclusive(&g_layoutIdCacheLock);
-    return copied;
-}
-
 // Resolve the active layout at paint time. Reads the keyboard layout from the
 // foreground thread, because that is the thread that actually receives the
 // layout change; the taskbar indicator's own thread does not necessarily
@@ -820,8 +747,7 @@ static bool GetIndicatorText(HWND hwnd, wchar_t* text, size_t textCount,
     const WORD langLow = LOWORD((UINT_PTR)layout);
     wchar_t layoutId[KL_NAMELENGTH] = {};
     if ((dev & 0xF000) == 0xF000) {
-        if (!FindCachedKlidByLayoutId((WORD)(dev & 0x0FFF),
-                                      layoutId, _countof(layoutId))) {
+        if (!FindKlidByLayoutId((WORD)(dev & 0x0FFF), layoutId, _countof(layoutId))) {
             swprintf_s(layoutId, L"%08X", (UINT)langLow);
         }
     } else if (dev == 0 || dev == langLow) {
@@ -941,14 +867,7 @@ static void PaintIndicatorCell(HWND hwnd, const wchar_t* why, HDC targetDc) {
         g_unloading.load(std::memory_order_acquire)) {
         return;
     }
-    // This DIB contains premultiplied per-pixel alpha. BitBlt copies its RGB
-    // channels opaquely and can reintroduce a solid/incorrect taskbar-colour box;
-    // AlphaBlend preserves the transparent pixels around the glyphs.
-    const BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-    if (!AlphaBlend(targetDc, 0, 0, width, height,
-                    memoryDc.get(), 0, 0, width, height, blend)) {
-        return;
-    }
+    BitBlt(targetDc, 0, 0, width, height, memoryDc.get(), 0, 0, SRCCOPY);
 
     const int logIndex = g_indicatorCellLogs.fetch_add(1, std::memory_order_relaxed);
     if (logIndex < 40) {
@@ -979,17 +898,13 @@ static void RequestIndicatorRepaint() {
     }
 }
 
-static void InvalidateIndicatorsForLayoutChange() {
-    if (g_unloading.load(std::memory_order_acquire) ||
-        !g_indicatorColours.load(std::memory_order_relaxed)) {
-        return;
-    }
-
+static void PostForceRepaintToIndicators() {
+    if (g_unloading.load(std::memory_order_acquire)) return;
     HWND targets[kMaxIndicatorTargets] = {};
     const int count = CopyIndicatorTargets(targets, _countof(targets));
     for (int i = 0; i < count; i++) {
         if (IsOwnProcessWindow(targets[i])) {
-            InvalidateRect(targets[i], nullptr, FALSE);
+            PostMessageW(targets[i], WM_APP_FORCE_INDICATOR_REPAINT, 0, 0);
         }
     }
 }
@@ -1005,7 +920,7 @@ static HKL WINAPI ActivateKeyboardLayout_Hook(HKL layout, UINT flags) {
     const HKL result = ActivateKeyboardLayout_Original(layout, flags);
     Wh_Log(L"[lang-hook] ActivateKeyboardLayout: requested=0x%p flags=0x%X prev=0x%p -> result=0x%p",
            (void*)layout, flags, (void*)previous, (void*)result);
-    InvalidateIndicatorsForLayoutChange();
+    PostForceRepaintToIndicators();
     return result;
 }
 
@@ -1014,7 +929,7 @@ static HKL WINAPI LoadKeyboardLayoutW_Hook(LPCWSTR id, UINT flags) {
     Wh_Log(L"[lang-hook] LoadKeyboardLayoutW: id=%s flags=0x%X -> result=0x%p",
            id ? id : L"(null)", flags, (void*)result);
     if (!(flags & KLF_NOTELLSHELL)) {
-        InvalidateIndicatorsForLayoutChange();
+        PostForceRepaintToIndicators();
     }
     return result;
 }
@@ -1060,6 +975,14 @@ static LRESULT IndicatorSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             if (coloursEnabled) {
                 HDC hdc = (HDC)wParam;
                 if (hdc) PaintIndicatorCell(hwnd, L"printclient", hdc);
+                return 0;
+            }
+            break;
+
+        case WM_APP_FORCE_INDICATOR_REPAINT:
+            if (coloursEnabled) {
+                InvalidateRect(hwnd, nullptr, FALSE);
+                UpdateWindow(hwnd);
                 return 0;
             }
             break;
@@ -1148,8 +1071,7 @@ static LRESULT IndicatorSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 static HANDLE g_layoutPollThread = nullptr;
 static HANDLE g_layoutPollStopEvent = nullptr;
 
-static DWORD WINAPI LayoutPollThread(LPVOID parameter) {
-    const HANDLE stopEvent = (HANDLE)parameter;
+static DWORD WINAPI LayoutPollThread(LPVOID) {
     DWORD lastFgHkl = 0;
     DWORD lastIndHkl = 0;
     {
@@ -1167,7 +1089,7 @@ static DWORD WINAPI LayoutPollThread(LPVOID parameter) {
     }
 
     for (;;) {
-        if (WaitForSingleObject(stopEvent, 100) != WAIT_TIMEOUT) break;
+        if (WaitForSingleObject(g_layoutPollStopEvent, 100) != WAIT_TIMEOUT) break;
         if (g_unloading.load(std::memory_order_acquire)) break;
         if (!g_indicatorColours.load(std::memory_order_relaxed)) continue;
 
@@ -1191,7 +1113,7 @@ static DWORD WINAPI LayoutPollThread(LPVOID parameter) {
                (unsigned)fgHkl, (unsigned)indHkl);
         lastFgHkl = fgHkl;
         lastIndHkl = indHkl;
-        InvalidateIndicatorsForLayoutChange();
+        PostForceRepaintToIndicators();
     }
     return 0;
 }
@@ -1204,8 +1126,7 @@ static bool StartLayoutPollThread() {
     } else {
         ResetEvent(g_layoutPollStopEvent);
     }
-    g_layoutPollThread = CreateThread(nullptr, 0, LayoutPollThread,
-                                      g_layoutPollStopEvent, 0, nullptr);
+    g_layoutPollThread = CreateThread(nullptr, 0, LayoutPollThread, nullptr, 0, nullptr);
     return g_layoutPollThread != nullptr;
 }
 
@@ -1227,20 +1148,20 @@ static HANDLE g_stopEvent = nullptr;
 static HANDLE g_languageThread = nullptr;
 
 static void InstallLanguageGuardHooks() {
-    const bool hookedShow = WindhawkUtils::SetFunctionHook(
-        ShowWindow, ShowWindow_Hook, &ShowWindow_Original);
-    const bool hookedAsync = WindhawkUtils::SetFunctionHook(
-        ShowWindowAsync, ShowWindowAsync_Hook, &ShowWindowAsync_Original);
-    const bool hookedCreate = WindhawkUtils::SetFunctionHook(
-        CreateWindowExW, CreateWindowExW_Hook, &CreateWindowExW_Original);
-    const bool hookedPos = WindhawkUtils::SetFunctionHook(
-        SetWindowPos, SetWindowPos_Hook, &SetWindowPos_Original);
-    const bool hookedActivate = WindhawkUtils::SetFunctionHook(
-        ActivateKeyboardLayout, ActivateKeyboardLayout_Hook,
-        &ActivateKeyboardLayout_Original);
-    const bool hookedLoad = WindhawkUtils::SetFunctionHook(
-        LoadKeyboardLayoutW, LoadKeyboardLayoutW_Hook,
-        &LoadKeyboardLayoutW_Original);
+    const bool hookedShow = Wh_SetFunctionHook((void*)ShowWindow, (void*)ShowWindow_Hook,
+                                               (void**)&ShowWindow_Original);
+    const bool hookedAsync = Wh_SetFunctionHook((void*)ShowWindowAsync, (void*)ShowWindowAsync_Hook,
+                                                (void**)&ShowWindowAsync_Original);
+    const bool hookedCreate = Wh_SetFunctionHook((void*)CreateWindowExW, (void*)CreateWindowExW_Hook,
+                                                 (void**)&CreateWindowExW_Original);
+    const bool hookedPos = Wh_SetFunctionHook((void*)SetWindowPos, (void*)SetWindowPos_Hook,
+                                              (void**)&SetWindowPos_Original);
+    const bool hookedActivate = Wh_SetFunctionHook((void*)ActivateKeyboardLayout,
+                                                   (void*)ActivateKeyboardLayout_Hook,
+                                                   (void**)&ActivateKeyboardLayout_Original);
+    const bool hookedLoad = Wh_SetFunctionHook((void*)LoadKeyboardLayoutW,
+                                               (void*)LoadKeyboardLayoutW_Hook,
+                                               (void**)&LoadKeyboardLayoutW_Original);
     Wh_Log(L"[language] guard hooks: ShowWindow %s, ShowWindowAsync %s, CreateWindowExW %s, SetWindowPos %s, ActivateKeyboardLayout %s, LoadKeyboardLayoutW %s",
            hookedShow ? L"installed" : L"not installed",
            hookedAsync ? L"installed" : L"not installed",
@@ -1276,12 +1197,11 @@ static void LogLanguageGuardFinished() {
     }
 }
 
-static DWORD WINAPI LanguageGuardThread(LPVOID parameter) {
-    const HANDLE stopEvent = (HANDLE)parameter;
+static DWORD WINAPI LanguageGuardThread(LPVOID) {
     bool firstCensus = true;
     for (;;) {
         if (g_unloading.load(std::memory_order_acquire) ||
-            WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0 ||
+            WaitForSingleObject(g_stopEvent, 0) == WAIT_OBJECT_0 ||
             !g_langGuardEnabled.load(std::memory_order_relaxed)) {
             break;
         }
@@ -1302,7 +1222,7 @@ static DWORD WINAPI LanguageGuardThread(LPVOID parameter) {
             }
             break;
         }
-        if (WaitForSingleObject(stopEvent, 500) == WAIT_OBJECT_0) break;
+        if (WaitForSingleObject(g_stopEvent, 500) == WAIT_OBJECT_0) break;
     }
     return 0;
 }
@@ -1335,8 +1255,7 @@ static bool StartLanguageGuardThread() {
         ResetEvent(g_stopEvent);
     }
 
-    g_languageThread = CreateThread(nullptr, 0, LanguageGuardThread,
-                                    g_stopEvent, 0, nullptr);
+    g_languageThread = CreateThread(nullptr, 0, LanguageGuardThread, nullptr, 0, nullptr);
     if (!g_languageThread) {
         Wh_Log(L"[language] failed to create the guard thread (%lu)", GetLastError());
     }
