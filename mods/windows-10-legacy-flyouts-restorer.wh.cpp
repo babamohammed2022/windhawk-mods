@@ -145,8 +145,6 @@ bytes and import-table entries of x64 shell modules, which does not carry over t
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.UI.Xaml.h>
 #include <Unknwn.h>
-#include <winrt/base.h>
-#include <ocidl.h>
 #include <combaseapi.h>
 #include <algorithm>
 #include <charconv>
@@ -198,14 +196,6 @@ bytes and import-table entries of x64 shell modules, which does not carry over t
 #include <limits.h>
 #include <string.h>
 #include <wininet.h>
-#include <aclapi.h>
-#include <wintrust.h>
-#include <softpub.h>
-#include <wincrypt.h>
-#include <bcrypt.h>
-#include <winternl.h>   // UNICODE_STRING for the LdrLoadDll hook
-#include <time.h>
-#include <tlhelp32.h>   // fotografia dei processi (moduli caricati, ecc.)
 #include <shellapi.h>
 #include <shlobj.h>     // SHParseDisplayName / SHOpenFolderAndSelectItems
 #include <wlanapi.h>    // interruttore Wi-Fi vero (riquadro in fondo al flyout)
@@ -780,98 +770,6 @@ namespace CppGuard {
 
 static constexpr DWORD kCppExceptionCode = 0xE06D7363u;
 static std::atomic<unsigned int> g_cppExceptionLogs{0};
-static std::atomic<unsigned int> g_foreignModsLogged{0};
-static std::atomic<bool> g_installed{false};
-static ULONGLONG g_selfBase = 0;
-
-static bool IsExactLoadedModIdentifier(const wchar_t* module,
-                                       const wchar_t* identifier) noexcept {
-    if (!module || !identifier) return false;
-    const size_t moduleLength = wcslen(module);
-    const size_t identifierLength = wcslen(identifier);
-    return (moduleLength == identifierLength &&
-            _wcsicmp(module, identifier) == 0) ||
-           (moduleLength == identifierLength + 4 &&
-            _wcsnicmp(module, identifier, identifierLength) == 0 &&
-            _wcsicmp(module + identifierLength, L".whl") == 0);
-}
-
-// Preserve the original one-time diagnostics about other Windhawk modules.
-static void LogForeignModsOnce() noexcept {
-    if (g_foreignModsLogged.fetch_add(1, std::memory_order_acq_rel) > 0) return;
-    try {
-        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32,
-                                               GetCurrentProcessId());
-        if (snap == INVALID_HANDLE_VALUE) return;
-        MODULEENTRY32W entry = {};
-        entry.dwSize = sizeof(entry);
-        wchar_t list[600] = {};
-        wchar_t incompatible[320] = {};
-        size_t used = 0;
-        size_t incompatibleUsed = 0;
-        int count = 0;
-        int incompatibleCount = 0;
-        static const wchar_t* const kIntegratedAnixxMods[] = {
-            L"win10-taskbar-on-win11-24h2",
-            L"fake-explorer-path",
-            L"win10-taskbar-context-menu-fix-24h2",
-        };
-        if (Module32FirstW(snap, &entry)) {
-            do {
-                if (reinterpret_cast<ULONGLONG>(entry.modBaseAddr) == g_selfBase) continue;
-                if (!wcsstr(entry.szExePath, L"\\Windhawk\\Engine\\Mods\\")) continue;
-                const size_t len = wcslen(entry.szModule);
-                if (!len || used + len + 3 >= _countof(list)) continue;
-                if (used) {
-                    list[used++] = L',';
-                    list[used++] = L' ';
-                }
-                wmemcpy(list + used, entry.szModule, len);
-                used += len;
-                list[used] = L'\0';
-                count++;
-                for (const wchar_t* identifier : kIntegratedAnixxMods) {
-                    if (!IsExactLoadedModIdentifier(entry.szModule, identifier)) continue;
-                    const size_t identifierLength = wcslen(identifier);
-                    if (incompatibleUsed + identifierLength + 3 >= _countof(incompatible)) continue;
-                    if (incompatibleUsed) {
-                        incompatible[incompatibleUsed++] = L',';
-                        incompatible[incompatibleUsed++] = L' ';
-                    }
-                    wmemcpy(incompatible + incompatibleUsed, identifier, identifierLength);
-                    incompatibleUsed += identifierLength;
-                    incompatible[incompatibleUsed] = L'\0';
-                    incompatibleCount++;
-                }
-            } while (Module32NextW(snap, &entry));
-        }
-        CloseHandle(snap);
-        if (count)
-            Wh_Log(L"[cpp-guard] other Windhawk mods loaded in this process (%d): %s", count, list);
-        else
-            Wh_Log(L"[cpp-guard] no other Windhawk mod is loaded in this process");
-        if (incompatibleCount)
-            Wh_Log(L"[cpp-guard] WARNING: integrated Anixx mod(s) also loaded: %s; disable them to avoid duplicate shell hooks", incompatible);
-    } catch (...) {
-    }
-}
-
-static void Install() noexcept {
-    if (g_installed.exchange(true, std::memory_order_acq_rel)) return;
-    try {
-        HMODULE self = nullptr;
-        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                               reinterpret_cast<LPCWSTR>(&Install), &self) && self) {
-            g_selfBase = reinterpret_cast<ULONGLONG>(self);
-        }
-        LogForeignModsOnce();
-    } catch (...) {
-    }
-}
-
-// There is no process-wide exception handler to remove.
-static void Uninstall() noexcept {}
 
 // Catches only language-level C++ and C++/WinRT exceptions. Hardware/OS
 // exceptions are not translated to C++ and must remain unhandled for diagnosis.
@@ -1090,113 +988,8 @@ static std::atomic<bool> ribbon10{true};
 static bool registryProcess = false;
 static bool explorerProcess = false;
 static bool privateExplorer = false;
-static std::atomic<bool> stopping{false};
 
-// Exact registry paths, including hive. Never override an unrelated value merely
-// because it has the same name. NtQueryKey also recognizes handles opened before
-// this mod, so no global bookkeeping of ordinary registry handles is necessary.
-static constexpr wchar_t kExplorerSubkey[] =
-    L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer";
-using NtQueryKeyFn = LONG(NTAPI*)(HANDLE, int, void*, ULONG, ULONG*);
-static NtQueryKeyFn ntQueryKey = nullptr;
-static std::wstring currentUserNative;
 
-static std::wstring KeyPath(HKEY key) {
-    if (key == HKEY_LOCAL_MACHINE) return L"\\REGISTRY\\MACHINE";
-    if (key == HKEY_CURRENT_USER) return currentUserNative;
-    if (!ntQueryKey || !key) return {};
-    struct KeyNameBuffer { ULONG length; wchar_t name[2048]; } buffer{};
-    ULONG required = 0;
-    // KeyNameInformation == 3. No native link dependency.
-    if (ntQueryKey(key, 3, &buffer, sizeof(buffer), &required) < 0 ||
-        buffer.length > sizeof(buffer.name) || buffer.length % sizeof(wchar_t))
-        return {};
-    return std::wstring(buffer.name, buffer.length / sizeof(wchar_t));
-}
-
-static std::wstring FullPath(HKEY key, LPCWSTR subkey) {
-    auto path = KeyPath(key);
-    if (path.empty()) return {};
-    if (subkey && *subkey) {
-        path += L'\\';
-        path += subkey;
-    }
-    while (!path.empty() && path.back() == L'\\') path.pop_back();
-    return path;
-}
-
-static bool IsExplorerPath(HKEY key, LPCWSTR subkey) {
-    if (currentUserNative.empty()) return false;
-    auto expected = currentUserNative + L"\\" + kExplorerSubkey;
-    return _wcsicmp(FullPath(key, subkey).c_str(), expected.c_str()) == 0;
-}
-
-// Win32 DWORD buffer contract, including size-only requests and ZEROONFAILURE.
-// Kept separate from the old Search helper to avoid changing its behavior.
-static LSTATUS CopyDword(DWORD value, bool getValue, DWORD flags,
-                         LPDWORD type, void* data, LPDWORD bytes) noexcept {
-    const DWORD capacity = bytes ? *bytes : 0;
-    auto fail = [&](LSTATUS error) noexcept {
-        if (getValue && (flags & RRF_ZEROONFAILURE) && data && bytes && capacity)
-            memset(data, 0, capacity);
-        return error;
-    };
-    if (data && !bytes) return ERROR_INVALID_PARAMETER;
-    if (getValue) {
-        constexpr DWORD allowed = RRF_RT_ANY | RRF_NOEXPAND | RRF_ZEROONFAILURE |
-                                  RRF_SUBKEY_WOW6432KEY | RRF_SUBKEY_WOW6464KEY;
-        if ((flags & ~allowed) ||
-            ((flags & RRF_SUBKEY_WOW6432KEY) && (flags & RRF_SUBKEY_WOW6464KEY)))
-            return fail(ERROR_INVALID_PARAMETER);
-    }
-    if (type) *type = REG_DWORD;
-    if (bytes) *bytes = sizeof(DWORD);
-    const DWORD filter = flags & RRF_RT_ANY;
-    if (getValue && filter && !(filter & RRF_RT_REG_DWORD))
-        return fail(ERROR_UNSUPPORTED_TYPE);
-    if (!data) return ERROR_SUCCESS;
-    if (capacity < sizeof(DWORD)) return fail(ERROR_MORE_DATA);
-    memcpy(data, &value, sizeof(value));
-    return ERROR_SUCCESS;
-}
-
-// 1.4.0: this used to also install RegOpenKeyExW/RegCloseKey hooks and a fake "Control
-// Center" registry key, to serve a virtual UseLiteLayout / DisableNotificationCenter for
-// this mod's own Action Center button and notification-policy features. Both features (and
-// this virtualization, which was never actually wired into a value-read hook and so never
-// served a value to anything) are removed: the user manages the Action Center with a
-// separate, dedicated mod. What remains here is only what IsExplorerPath needs: the native
-// path of HKEY_CURRENT_USER, used (unconditionally, not gated behind the Action Center
-// flag this used to require) by the EnableAutoTray virtual read below.
-static bool InitializeKeyPathSupport() noexcept {
-    try {
-        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-        ntQueryKey = ntdll ? reinterpret_cast<NtQueryKeyFn>(
-            GetProcAddress(ntdll, "NtQueryKey")) : nullptr;
-        ScopedRegKey user;
-        if (RegOpenCurrentUser(KEY_QUERY_VALUE, user.put()) == ERROR_SUCCESS)
-            currentUserNative = KeyPath(user.get());
-        if (!ntQueryKey) {
-            Wh_Log(L"[native-ui] NtQueryKey unavailable: handle-based reads cannot be matched");
-            return false;
-        }
-        return true;
-    } catch (...) {
-        Wh_Log(L"[native-ui] key path initialization exception");
-        return false;
-    }
-}
-
-static bool BlockXamlAdapter(REFCLSID clsid) noexcept {
-    try {
-        // m417z's classicRibbonUI branch; no Moments navigation-bar patches.
-        static constexpr GUID adapter = {0x6480100b, 0x5a83, 0x4d1e,
-            {0x9f, 0x69, 0x8a, 0xe5, 0xa8, 0x8e, 0x9a, 0x33}};
-        return explorerProcess && !stopping.load() && ribbon10.load() &&
-               IsEqualCLSID(clsid, adapter);
-    } catch (...) { Wh_Log(L"[ribbon] selector exception; keeping system UI"); }
-    return false;
-}
 }  // namespace NativeUi
 
 static bool Sha256File(const wchar_t* path, std::wstring& outHex) {
@@ -1454,8 +1247,6 @@ static bool EnsureDirectory(const wchar_t* dir) {
 }
 
 
-static DWORD g_servicesThreadId = 0;
-
 
 static bool ContainsNoCase(const wchar_t* haystack, const wchar_t* needle) {
     if (!haystack || !needle || !*needle) return false;
@@ -1465,147 +1256,6 @@ static bool ContainsNoCase(const wchar_t* haystack, const wchar_t* needle) {
     }
     return false;
 }
-
-// so pnidui takes the flyout path instead of opening Settings on its
-// own. The registry is not touched: the forcing only applies to the
-// reads of this shell and disappears when the shell closes.
-static std::atomic<bool> g_networkValueForce{false};
-// The forced network-icon path only needs EnableAutoTray=0 as observed by the
-// private legacy Explorer. Never persist that transient answer in HKCU.
-static std::atomic<bool> g_autoTrayVirtual{false};
-static bool g_replaceVanLogged = false;
-
-// Chiave esatta: ...\CurrentVersion\Control Panel\Settings\Network. Il nome del
-// valore da solo non basta: "Van" o "NetworkFlyout" possono comparire in altre
-// chiavi, e li' il valore dell'utente non va toccato. Il confronto e' sulla coda
-// del percorso, cosi' vale sia per HKCU (che ha il SID davanti) sia per HKLM.
-static constexpr wchar_t kNetworkPolicyKeyTail[] =
-    L"\\CurrentVersion\\Control Panel\\Settings\\Network";
-
-static bool EndsWithNetworkPolicyTail(const wchar_t* path, size_t chars) {
-    const size_t tailChars = (sizeof(kNetworkPolicyKeyTail) / sizeof(wchar_t)) - 1;
-    if (!path || chars < tailChars) return false;
-    return _wcsicmp(path + (chars - tailChars), kNetworkPolicyKeyTail) == 0;
-}
-
-static bool IsNetworkPolicyKeyPath(LPCWSTR path) {
-    return path && EndsWithNetworkPolicyTail(path, wcslen(path));
-}
-
-// Il percorso di un handle si legge con NtQueryKey (RegQueryInfoKey non lo da'):
-// risolta a runtime, cosi' non serve nessuna importazione in piu'.
-typedef LONG(NTAPI* NtQueryKey_t)(HANDLE, ULONG, PVOID, ULONG, PULONG);
-static NtQueryKey_t ResolveNtQueryKey() noexcept {
-    static NtQueryKey_t resolved = []() -> NtQueryKey_t {
-        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-        return ntdll ? (NtQueryKey_t)GetProcAddress(ntdll, "NtQueryKey") : nullptr;
-    }();
-    return resolved;
-}
-
-static bool KeyIsNetworkPolicyKey(HKEY key) noexcept {
-    if (!key) return false;
-    NtQueryKey_t query = ResolveNtQueryKey();
-    if (!query) return false;
-    struct {
-        ULONG nameLength;   // in byte, senza il terminatore
-        WCHAR name[512];
-    } info = {};
-    ULONG length = 0;
-    if (query((HANDLE)key, 3 /* KeyNameInformation */, &info, sizeof(info), &length) < 0)
-        return false;
-    if (info.nameLength == 0) return false;
-    size_t chars = info.nameLength / sizeof(wchar_t);
-    if (chars >= _countof(info.name)) chars = _countof(info.name) - 1;
-    info.name[chars] = 0;
-    return IsNetworkPolicyKeyPath(info.name);
-}
-
-static bool IsNetworkPolicyValueName(LPCWSTR name) {
-    if (!name) return false;
-    if (_wcsicmp(name, L"ReplaceVan") == 0 || _wcsicmp(name, L"VANFromPCSettings") == 0) return true;
-    // Le grafie storiche con "Van" restano accettate, ma solo DENTRO la chiave
-    // giusta (vedi KeyIsNetworkPolicyKey/IsNetworkPolicyKeyPath): su altre build
-    // il nome cambia e il log dice quale era.
-    return ContainsNoCase(name, L"Van") || ContainsNoCase(name, L"NetworkFlyout");
-}
-
-static wchar_t g_forcedNames[8][64] = {};
-static int g_forcedNamesCount = 0;
-
-// One line per name (max 8): the user's log shows exactly which
-// value tells pnidui which interface to show.
-static void ReportNetworkPolicyForced(LPCWSTR name) {
-    if (!name) return;
-    for (int i = 0; i < g_forcedNamesCount; i++) {
-        if (_wcsicmp(g_forcedNames[i], name) == 0) return;
-    }
-    if (g_forcedNamesCount >= (int)_countof(g_forcedNames)) return;
-    wcsncpy_s(g_forcedNames[g_forcedNamesCount++], _countof(g_forcedNames[0]), name, _TRUNCATE);
-    Wh_Log(L"[network] policy value forced to 0: %s", name);
-}
-
-static void ReportReplaceVanForced() {
-    if (g_replaceVanLogged) return;
-    g_replaceVanLogged = true;
-    Wh_Log(L"[network] ReplaceVan/VANFromPCSettings forced to 0 in this shell: pnidui must use the flyout, not Settings");
-}
-
-// true = value forced and answer given; false = a bigger buffer is needed
-// (the caller answers ERROR_MORE_DATA, as the system does).
-static bool ForceNetworkValueZero(LPDWORD lpType, LPBYTE lpData, LPDWORD lpcbData) {
-    ReportReplaceVanForced();
-    if (lpType) *lpType = REG_DWORD;
-    if (!lpData) {
-        if (lpcbData) *lpcbData = sizeof(DWORD);
-        return true;
-    }
-    if (!lpcbData || *lpcbData < sizeof(DWORD)) {
-        if (lpcbData) *lpcbData = sizeof(DWORD);
-        return false;
-    }
-    *(DWORD*)lpData = 0;
-    *lpcbData = sizeof(DWORD);
-    return true;
-}
-
-typedef LONG(WINAPI* RegQueryValueExW_t)(HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD);
-static RegQueryValueExW_t RegQueryValueExW_Original = nullptr;
-typedef LSTATUS(WINAPI* RegSetValueExW_t)(HKEY, LPCWSTR, DWORD, DWORD, const BYTE*, DWORD);
-static RegSetValueExW_t RegSetValueExW_Original = nullptr;
-
-
-
-// This applies only to the private Explorer's exact Explorer key. It deliberately
-// covers only the two public read APIs already hooked by this mod.
-static bool TryReadVirtualAutoTray(HKEY key, LPCWSTR subkey, LPCWSTR name,
-                                   bool getValue, DWORD flags, LPDWORD type,
-                                   void* data, LPDWORD bytes,
-                                   LSTATUS* result) noexcept {
-    try {
-        if (!result || !g_autoTrayVirtual.load(std::memory_order_acquire) ||
-            !NativeUi::privateExplorer || !name ||
-            _wcsicmp(name, L"EnableAutoTray") != 0 ||
-            !NativeUi::IsExplorerPath(key, subkey)) {
-            return false;
-        }
-        *result = NativeUi::CopyDword(0, getValue, flags, type, data, bytes);
-        static std::atomic<bool> reported{false};
-        if (!reported.exchange(true))
-            Wh_Log(L"[tray-force] serving virtual EnableAutoTray=0 in the private Explorer (not a registry write)");
-        return true;
-    } catch (...) {
-        Wh_Log(L"[tray-force] EnableAutoTray virtual read exception; using the real registry");
-        return false;
-    }
-}
-
-#define IDM_SHOWDESKTOP  0x197
-#define IDM_TASKMANAGER  0x1A4
-#define IDM_LOCKTASKBAR  0x1A8
-#define IDM_SETTINGS     0x19D
-#define IDM_LOCKTOOLBARS 41484
-
 
 #define IDM_MOD_SHOWDESKTOP 0x7C74
 // The show desktop button panel: "Show desktop" and "Peek at desktop". Explorer's own
@@ -1624,10 +1274,6 @@ static bool IsSeparatorItem(HMENU menu, int pos) {
 
 // Forward declarations needed by ShowBatteryMenu (defined further below).
 static bool HandleClassicMenuCommand(UINT id);
-
-static bool MenuContainsId(HMENU menu, UINT id);
-static HWND FindNativeTaskbarStartButton();
-static bool IsWinXNativeContextMenuRequest();
 
 // === MULTI-LANGUAGE SUPPORT for tray context menus (battery, network,
 // clock, show-desktop) and for the strings served to the tray modules.
@@ -2260,132 +1906,6 @@ static void ShowBatteryMenu(HWND serviceWindow) {
 static int g_classicCmdLogs = 0;
 
 
-
-
-#define IDS_TASKMANAGER  24743   // shell32.dll
-#define IDS_SETTINGS     2128    // bthprops.cpl
-
-typedef HMENU(WINAPI* LoadMenuW_t)(HINSTANCE, LPCWSTR);
-static LoadMenuW_t LoadMenuW_Original = nullptr;
-
-static HMODULE g_shell32 = nullptr;
-static HMODULE g_bthprops = nullptr;
-static HMODULE g_explorerframe = nullptr;
-
-static wchar_t* LoadStr(HMODULE mod, UINT id, wchar_t* buf, int size) {
-    if (mod && LoadStringW(mod, id, buf, size) > 0) return buf;
-    return nullptr;
-}
-
-static bool GetLockToolbarsText(wchar_t* buf, int size) {
-    if (!g_explorerframe) return false;
-    HMENU menu = LoadMenuW_Original(g_explorerframe, MAKEINTRESOURCEW(264));
-    if (!menu) return false;
-
-    bool found = false;
-    int count = GetMenuItemCount(menu);
-    for (int i = 0; i < count && !found; i++) {
-        MENUITEMINFOW mii = {};
-        mii.cbSize = sizeof(mii);
-        mii.fMask = MIIM_SUBMENU;
-        if (!GetMenuItemInfoW(menu, i, TRUE, &mii) || !mii.hSubMenu) continue;
-        for (int j = 0, subCount = GetMenuItemCount(mii.hSubMenu); j < subCount; j++) {
-            wchar_t text[256] = {};
-            MENUITEMINFOW sub = {};
-            sub.cbSize = sizeof(sub);
-            sub.fMask = MIIM_ID | MIIM_STRING;
-            sub.dwTypeData = text;
-            sub.cch = _countof(text) - 1;
-            if (GetMenuItemInfoW(mii.hSubMenu, j, TRUE, &sub) && sub.wID == IDM_LOCKTOOLBARS) {
-                wcsncpy_s(buf, size, text, _TRUNCATE);
-                found = true;
-                break;
-            }
-        }
-    }
-    DestroyMenu(menu);
-    return found;
-}
-
-
-// One line with the entries of the menu as they came out, so the order can be
-// checked against the Windows 10 menu without guessing.
-static int g_menuOrderLogs = 0;
-
-static void LogTaskbarMenuOrder(HMENU menu) {
-    if (!menu || g_menuOrderLogs >= 1) return;
-    g_menuOrderLogs++;
-    wchar_t line[512] = {};
-    size_t used = 0;
-    const int count = GetMenuItemCount(menu);
-    for (int i = 0; i < count && used < _countof(line) - 40; i++) {
-        wchar_t buf[96] = {};
-        wchar_t piece[104] = {};
-        if (IsSeparatorItem(menu, i))
-            wcscpy_s(piece, L"---");
-        else if (GetMenuStringW(menu, i, buf, _countof(buf), MF_BYPOSITION) > 0) {
-            MENUITEMINFOW mii = {};
-            mii.cbSize = sizeof(mii);
-            mii.fMask = MIIM_SUBMENU;
-            GetMenuItemInfoW(menu, i, TRUE, &mii);
-            swprintf_s(piece, mii.hSubMenu ? L"%s >" : L"%s", buf);
-        } else
-            continue;
-        if (used) { wcscat_s(line, L" | "); used = wcslen(line); }
-        wcsncat_s(line, piece, _TRUNCATE);
-        used = wcslen(line);
-    }
-    Wh_Log(L"[menu] native menu order: %s", line);
-}
-
-static void EnhanceTaskbarMenu(HMENU menu) {
-    HMENU popup = GetSubMenu(menu, 0);
-    if (!popup) popup = menu;
-
-    for (int i = GetMenuItemCount(popup) - 1; i >= 0; i--) {
-        MENUITEMINFOW mii = {};
-        mii.cbSize = sizeof(mii);
-        mii.fMask = MIIM_FTYPE | MIIM_ID | MIIM_SUBMENU;
-        if (GetMenuItemInfoW(popup, i, TRUE, &mii) &&
-            !(mii.fType & MFT_SEPARATOR) && !mii.hSubMenu) {
-            DeleteMenu(popup, i, MF_BYPOSITION);
-        }
-    }
-
-
-    LogTaskbarMenuOrder(popup);
-
-
-
-    wchar_t buf[256] = {};
-    wchar_t* text = nullptr;
-
-
-    text = LoadStr(g_shell32, IDS_TASKMANAGER, buf, _countof(buf));
-    AppendMenuW(popup, MF_STRING, IDM_TASKMANAGER, text ? text : L"Task Manager");
-    AppendMenuW(popup, MF_SEPARATOR, 0, nullptr);
-
-    wchar_t lockBuf[256] = {};
-    AppendMenuW(popup, MF_STRING, IDM_LOCKTASKBAR,
-                GetLockToolbarsText(lockBuf, _countof(lockBuf)) ? lockBuf : L"Lock the taskbar");
-
-    text = LoadStr(g_bthprops, IDS_SETTINGS, buf, _countof(buf));
-    AppendMenuW(popup, MF_STRING, IDM_SETTINGS, text ? text : L"Taskbar settings");
-}
-
-
-static bool MenuContainsId(HMENU menu, UINT id) {
-    const int count = menu ? GetMenuItemCount(menu) : -1;
-    for (int i = 0; i < count; i++) {
-        MENUITEMINFOW mii = {};
-        mii.cbSize = sizeof(mii);
-        mii.fMask = MIIM_ID | MIIM_SUBMENU;
-        if (!GetMenuItemInfoW(menu, i, TRUE, &mii)) continue;
-        if (mii.wID == id) return true;
-        if (mii.hSubMenu && MenuContainsId(mii.hSubMenu, id)) return true;
-    }
-    return false;
-}
 
 
 static bool ToggleDesktopLikeWin10() {
@@ -3366,7 +2886,6 @@ static void RestorePniduiShellExecuteExIatOnUnload() noexcept {
         DWORD ignored = 0;
         VirtualProtect(g_pniduiShellExecuteExIatSlot, sizeof(void*), oldProtect, &ignored);
     }
-    g_pniduiShellExecuteExIatSlot = nullptr;
 }
 
 // Installs the two entry points of the network click. The global hook covers every
@@ -3552,7 +3071,6 @@ static UINT NetworkMenuMessage() {
 static LRESULT NetworkIconSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
                                        DWORD_PTR ref) {
     (void)ref;
-    (void)wParam;
     try {
 
         if (msg == NetworkMenuMessage()) {
@@ -6203,17 +5721,6 @@ static void DescribeModuleAtAddress(const void* address, wchar_t* out, size_t cc
 
 static HRESULT WINAPI CoCreateInstance_Hook(REFCLSID clsid, LPUNKNOWN outer, DWORD context,
                                             REFIID iid, LPVOID* ppv) {
-    try {
-        if (NativeUi::BlockXamlAdapter(clsid)) {
-            if (!ppv) return E_POINTER;
-            *ppv = nullptr;
-            static std::atomic<bool> reported{false};
-            if (!reported.exchange(true))
-                Wh_Log(L"[ribbon] requesting native Win10 ribbon via m417z classicRibbonUI COM fallback");
-            return REGDB_E_CLASSNOTREG;
-        }
-    } catch (...) { Wh_Log(L"[ribbon] COM gate exception; using original activation"); }
-
     const bool networkSso = IsEqualCLSID(clsid, kNetworkTraySsoClsid) != FALSE;
     if (networkSso && NativeUi::privateExplorer && g_cfg.provideTrayDlls) {
         if (!g_networkSsoActivationSeen.exchange(true))
@@ -6733,8 +6240,6 @@ static void LogCallerModule(void* caller, wchar_t* buf, size_t count) {
 
 namespace NetworkTrayForce {
 
-static constexpr wchar_t kExplorerKey[] =
-    L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer";
 static constexpr wchar_t kTrayNotifyKey[] =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\TrayNotify";
 static constexpr wchar_t kOwnerClass[] = L"Win10Restorer_NetworkIconWnd";
@@ -6769,9 +6274,6 @@ static std::atomic<bool> g_autoTrayRestored{false};
 // di TrayNotify scattano solo se, dopo l'attesa, l'icona forzata non e' comparsa:
 // "menu overflow all'avvio" invariato.
 static std::atomic<bool> g_escalate{false};
-static ULONGLONG g_verifiedSince = 0;
-static int g_restoreAttempts = 0;
-static int g_restoreLogNotes = 0;
 static int g_clickLogNotes = 0;
 static ULONGLONG g_lastClickTick = 0;
 
@@ -8194,11 +7696,9 @@ static void VerifyForcedIcon() noexcept {
                        rect.bottom);
             }
             g_verifyFailures = 0;
-            if (!g_verifiedSince) g_verifiedSince = now;
             return;
         }
         ++g_verifyFailures;
-        if (g_autoTrayRestored.load()) ReApplyAllIconsMode();
         if (g_verifyFailures == 1 || g_verifyFailures % kMaxRetryLog == 0)
             Wh_Log(L"[tray-force] the icon is still not in the bar (attempt %d): "
                    L"the registration is published again", g_verifyFailures);
@@ -8321,28 +7821,12 @@ static void Tick() noexcept {
             g_forcedPublished = PublishForcedRegistration();
 
         if (g_forcedPublished) VerifyForcedIcon();
-
-        // Icona vista per alcuni secondi -> togliere solo l'override virtuale,
-        // cosi' il valore reale e il pulsante di overflow restano dell'utente.
-        if (g_cfg.trayRestoreOverflowChevron &&
-            g_autoTrayVirtual.load(std::memory_order_acquire) &&
-            !g_autoTrayRestored.load() && g_restoreAttempts < 2 &&
-            g_verifiedLogged && g_verifiedSince && now - g_verifiedSince > 8000) {
-            if (RestoreOverflowChevron()) {
-                g_autoTrayRestored.store(true);
-                PublishForcedRegistration();
-                g_nextVerify = 0;
-            }
-        }
     } catch (...) {
         Wh_Log(L"[tray-force] exception in the escalation ladder loop");
     }
 }
 
 static void Shutdown() noexcept {
-    // L'hook puo' essere interrogato durante lo shutdown: non lasciare una
-    // risposta locale al processo attiva dopo l'arresto del componente tray.
-    g_autoTrayVirtual.store(false, std::memory_order_release);
     try {
         if (g_stopping.exchange(true, std::memory_order_acq_rel)) return;
 
@@ -8391,7 +7875,6 @@ static void Shutdown() noexcept {
 
 static void SettingsChanged() noexcept {
     try {
-        g_autoTrayVirtual.store(false, std::memory_order_release);
         g_stopping.store(false, std::memory_order_release);
         g_guaranteesApplied = false;
     } catch (...) {
@@ -8402,123 +7885,6 @@ static void SettingsChanged() noexcept {
 
 
 
-
-
-struct StartReplacementWindowProbe {
-    wchar_t evidence[128] = {};
-};
-
-
-static int StartButtonEdgeDistance(HWND hwnd, const RECT& taskbarRect) {
-    RECT buttonRect = {};
-    if (!GetWindowRect(hwnd, &buttonRect)) return INT_MAX;
-    const int taskbarWidth = taskbarRect.right - taskbarRect.left;
-    const int taskbarHeight = taskbarRect.bottom - taskbarRect.top;
-    const bool horizontal = taskbarWidth >= taskbarHeight;
-    return horizontal ? abs((int)buttonRect.left - (int)taskbarRect.left)
-                      : abs((int)buttonRect.top - (int)taskbarRect.top);
-}
-
-static bool IsPlausibleStartButton(HWND hwnd, HWND taskbar, const RECT& taskbarRect,
-                                   bool allowEdgeButton) {
-    if (!hwnd || !IsWindow(hwnd) || !IsWindowVisible(hwnd) || !IsWindowEnabled(hwnd) ||
-        !IsChild(taskbar, hwnd)) return false;
-    DWORD pid = 0;
-    GetWindowThreadProcessId(hwnd, &pid);
-    if (pid != GetCurrentProcessId()) return false;
-
-    RECT rect = {};
-    if (!GetWindowRect(hwnd, &rect)) return false;
-    const int width = (int)(rect.right - rect.left);
-    const int height = (int)(rect.bottom - rect.top);
-    if (width <= 0 || height <= 0 || width > 240 || height > 240) return false;
-
-    wchar_t cls[128] = {};
-    if (!GetClassNameW(hwnd, cls, _countof(cls))) return false;
-    const int controlId = GetDlgCtrlID(hwnd);
-    // Unico vero criterio per il pulsante Start nativo di Windows:
-    // control ID 0x130. Non accettiamo più la classe "Start"/"StartButton"
-    // perché OpenShell usa esattamente quella classe per il suo pulsante.
-    if (controlId == 0x130) return true;
-
-    // Ultima spiaggia: solo per build dove l'ID è cambiato, e solo se è
-    // davvero un "Button" al bordo della taskbar.
-    if (!allowEdgeButton || _wcsicmp(cls, L"Button") != 0) return false;
-    const int edgeDistance = StartButtonEdgeDistance(hwnd, taskbarRect);
-    return edgeDistance >= 0 && edgeDistance <= 180;
-}
-
-struct StartButtonSearch {
-    HWND taskbar = nullptr;
-    RECT taskbarRect = {};
-    HWND byId = nullptr;
-    HWND byClass = nullptr;
-    HWND byEdge = nullptr;
-    int edgeDistance = INT_MAX;
-};
-
-static BOOL CALLBACK FindStartButtonChildProc(HWND hwnd, LPARAM param) {
-    auto* search = (StartButtonSearch*)param;
-    if (GetDlgCtrlID(hwnd) == 0x130 &&
-        IsPlausibleStartButton(hwnd, search->taskbar, search->taskbarRect, false)) {
-        search->byId = hwnd;
-        return FALSE;
-    }
-
-    wchar_t cls[128] = {};
-    if (GetClassNameW(hwnd, cls, _countof(cls)) &&
-        ((_wcsicmp(cls, L"Start") == 0) || ContainsNoCase(cls, L"StartButton")) &&
-        IsPlausibleStartButton(hwnd, search->taskbar, search->taskbarRect, false)) {
-        search->byClass = hwnd;
-        return FALSE;
-    }
-
-    if (IsPlausibleStartButton(hwnd, search->taskbar, search->taskbarRect, true)) {
-        const int distance = StartButtonEdgeDistance(hwnd, search->taskbarRect);
-        if (distance < search->edgeDistance) {
-            search->byEdge = hwnd;
-            search->edgeDistance = distance;
-        }
-    }
-    return TRUE;
-}
-
-static HWND FindNativeTaskbarStartButton() {
-    HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
-    if (!taskbar) return nullptr;
-    DWORD pid = 0;
-    GetWindowThreadProcessId(taskbar, &pid);
-    if (pid != GetCurrentProcessId()) return nullptr;
-
-    RECT taskbarRect = {};
-    if (!GetWindowRect(taskbar, &taskbarRect)) return nullptr;
-
-    HWND byId = GetDlgItem(taskbar, 0x130);
-    if (IsPlausibleStartButton(byId, taskbar, taskbarRect, false)) return byId;
-
-    StartButtonSearch search = {};
-    search.taskbar = taskbar;
-    search.taskbarRect = taskbarRect;
-    EnumChildWindows(taskbar, FindStartButtonChildProc, (LPARAM)&search);
-    if (search.byId) return search.byId;
-    if (search.byClass) return search.byClass;
-    return search.byEdge;
-}
-
-static bool IsWinXNativeContextMenuRequest() {
-    // Il clic destro sul pulsante Start resta di Windows: il menu del pulsante Start
-    // (Win+X) non e' di questo mod, ed e' un altro modulo a mostrarlo. Il test sul
-    // cursore protegge quel percorso anche dove un hook non si e' potuto installare.
-    HWND startButton = FindNativeTaskbarStartButton();
-    POINT pt = {};
-    RECT rect = {};
-    if (!startButton || !GetCursorPos(&pt) ||
-        !GetWindowRect(startButton, &rect) || !PtInRect(&rect, pt))
-        return false;
-    HWND hitWindow = WindowFromPoint(pt);
-    return hitWindow == startButton ||
-           (hitWindow && IsChild(startButton, hitWindow));
-}
 
 
 // To be used ONLY with g_realExePath: after the path spoof GetModuleFileNameW
@@ -8611,7 +7977,6 @@ static void LoadFlyoutSettings() {
     _snwprintf_s(g_cfg.explorerPath, _countof(g_cfg.explorerPath), _TRUNCATE,
                  L"%s\\explorer.exe", g_cfg.storePath);
 
-    g_cfg.buildIndex = 0;                 // 10.0.19039.1: the build the tray files are pinned to
     g_cfg.provideTrayDlls = Wh_GetIntSetting(L"ProvideTrayModules") != 0;
     g_cfg.requireSignature = Wh_GetIntSetting(L"RequireSignature") != 0;
     g_cfg.downloadTimeoutSec = Wh_GetIntSetting(L"DownloadTimeoutSec");
@@ -8625,16 +7990,10 @@ static void LoadFlyoutSettings() {
     if (g_cfg.forceNetworkTrayDelaySec > 600) g_cfg.forceNetworkTrayDelaySec = 600;
     g_cfg.forceNetworkTrayResetTraySettings =
         Wh_GetIntSetting(L"ForceNetworkTrayResetTraySettings") != 0;
-    g_cfg.trayRestoreOverflowChevron =
-        Wh_GetIntSetting(L"TrayRestoreOverflowChevron") != 0;
     g_cfg.shellOpGuardTimeoutMs = Wh_GetIntSetting(L"ShellOpGuardTimeoutMs");
     if (g_cfg.shellOpGuardTimeoutMs < 200) g_cfg.shellOpGuardTimeoutMs = 200;
     if (g_cfg.shellOpGuardTimeoutMs > 10000) g_cfg.shellOpGuardTimeoutMs = 10000;
-    // Constants of the reference mod: no private QuickActions binary patch is applied by
-    // this source, and the experimental UWP taskbar buttons stay off.
-    g_cfg.fixUwpTaskbar = false;
     g_logTrayActivity = Wh_GetIntSetting(L"LogTrayActivity") != 0;
-    g_squareFlyoutCorners = Wh_GetIntSetting(L"ExperimentalSquareFlyoutCorners") != 0;
 }
 // ---------------------------------------------------------------------------
 // The two tray windows that own a menu of their own
@@ -8880,135 +8239,6 @@ static bool PrepareTrayStore() {
     return complete;
 }
 
-// Is the running process the given image? The panel belongs to another process, so the
-// name of the image is what tells the two apart.
-static bool ImageNameIs(const wchar_t* path, const wchar_t* expected) {
-    if (!path || !expected) return false;
-    const wchar_t* base = wcsrchr(path, L'\\');
-    return _wcsicmp(base ? base + 1 : path, expected) == 0;
-}
-
-static bool IsCoreWindow(HWND hwnd) {
-    if (!hwnd) return false;
-    wchar_t cls[64] = {};
-    if (!GetClassNameW(hwnd, cls, _countof(cls))) return false;
-    return wcscmp(cls, L"Windows.UI.Core.CoreWindow") == 0;
-}
-
-typedef HRESULT(WINAPI* DwmSetWindowAttribute_t)(HWND, DWORD, LPCVOID, DWORD);
-static DwmSetWindowAttribute_t DwmSetWindowAttribute_Original = nullptr;
-static const DWORD kDwmwaCloak = 13;
-
-static HRESULT WINAPI DwmSetWindowAttribute_Hook(HWND hwnd, DWORD attribute, LPCVOID value,
-                                                DWORD size) {
-    if (!DwmSetWindowAttribute_Original) return E_FAIL;   // hook in place, original unknown
-    if (g_unloading.load(std::memory_order_seq_cst))
-        return DwmSetWindowAttribute_Original(hwnd, attribute, value, size);
-    // EXPERIMENTAL and off by default (ExperimentalSquareFlyoutCorners; it does not work,
-    // see g_squareFlyoutCorners): square corners for the flyouts of this process. Windows 11
-    // rounds every top-level window through DWM; the documented switch is
-    // DWMWA_WINDOW_CORNER_PREFERENCE (33) with DWMWCP_DONOTROUND (1). It is set when a
-    // CoreWindow of ShellExperienceHost.exe is about to be shown (cloak value 0), once per
-    // window handle, on the thread that shows it. The window is the one the network flyout
-    // lives in, as well as the other flyouts of this shell.
-    if (g_squareFlyoutCorners && attribute == kDwmwaCloak && value && size >= sizeof(int) &&
-        *static_cast<const int*>(value) == 0 && IsCoreWindow(hwnd) &&
-        ImageNameIs(g_realExePath, L"ShellExperienceHost.exe")) {
-        try {
-            static HWND s_squared[16] = {};
-            static int s_next = 0;
-            bool already = false;
-            for (HWND w : s_squared) if (w == hwnd) { already = true; break; }
-            if (!already) {
-                const int doNotRound = 1;   // DWMWCP_DONOTROUND
-                const HRESULT hrCorner =
-                    DwmSetWindowAttribute_Original(hwnd, 33, &doNotRound, sizeof(doNotRound));
-                s_squared[s_next++ % 16] = hwnd;
-                static LONG s_cornerLogs = 0;
-                if (InterlockedIncrement(&s_cornerLogs) <= 4)
-                    Wh_Log(L"[networkux] square window corners requested (DWMWCP_DONOTROUND) "
-                           L"for 0x%p: 0x%08X", (void*)hwnd, (unsigned)hrCorner);
-            }
-        } catch (...) {
-        }
-    }
-    return DwmSetWindowAttribute_Original(hwnd, attribute, value, size);
-}
-
-// 1.3.9: the cloak hook above never fired for the network flyout in the user's log (no
-// "square window corners" line), so the corner preference is also applied directly: every
-// top-level window of this process gets DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_DONOTROUND.
-// It is called once at start, in the ShellExperienceHost.exe branch of Wh_ModInit. The classes
-// and titles of the windows found are logged, so the log says which window the flyout really
-// lives in and what DWM answered.
-static BOOL CALLBACK SquareWindowProc(HWND hwnd, LPARAM lParam) {
-    try {
-        DWORD pid = 0;
-        GetWindowThreadProcessId(hwnd, &pid);
-        if (pid != GetCurrentProcessId()) return TRUE;
-        const int doNotRound = 1;   // DWMWCP_DONOTROUND
-        const HRESULT hr = DwmSetWindowAttribute_Original
-            ? DwmSetWindowAttribute_Original(hwnd, 33, &doNotRound, sizeof(doNotRound))
-            : DwmSetWindowAttribute(hwnd, 33, &doNotRound, sizeof(doNotRound));
-        int* counter = reinterpret_cast<int*>(lParam);
-        if (counter) ++*counter;
-        static LONG s_logs = 0;
-        if (InterlockedIncrement(&s_logs) <= 12) {
-            wchar_t cls[64] = {};
-            wchar_t title[64] = {};
-            GetClassNameW(hwnd, cls, _countof(cls));
-            GetWindowTextW(hwnd, title, _countof(title));
-            Wh_Log(L"[networkux] square corners: window 0x%p class '%s' title '%s' visible %d "
-                   L"-> 0x%08X", (void*)hwnd, cls, title, IsWindowVisible(hwnd) ? 1 : 0,
-                   (unsigned)hr);
-        }
-    } catch (...) {
-    }
-    return TRUE;
-}
-
-static void SquareShellWindowsNow() noexcept {
-    if (!g_squareFlyoutCorners) return;   // experimental, off by default (see g_squareFlyoutCorners)
-    try {
-        static ULONGLONG s_last = 0;
-        const ULONGLONG now = GetTickCount64();
-        if (now - s_last < 400) return;
-        s_last = now;
-        int count = 0;
-        EnumWindows(SquareWindowProc, reinterpret_cast<LPARAM>(&count));
-        static LONG s_summary = 0;
-        if (count == 0 && InterlockedIncrement(&s_summary) <= 3)
-            Wh_Log(L"[networkux] square corners: no top-level window of this process yet");
-    } catch (...) {
-    }
-}
-
-// Installed once, from both processes this mod is loaded in (the private shell and
-// ShellExperienceHost.exe): only the DWM cloak hook is needed for the experimental
-// square-corners feature (ExperimentalSquareFlyoutCorners); the Action Center animation
-// this used to also install is gone, see the removal note near the top of the file.
-static void InstallSquareCornersHook() {
-    if (g_squareCornersHookInstalled) return;
-    g_squareCornersHookInstalled = true;
-    try {
-        HMODULE dwmapi = LoadLibraryExW(L"dwmapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-        if (dwmapi) {
-            void* target = reinterpret_cast<void*>(GetProcAddress(dwmapi, "DwmSetWindowAttribute"));
-            if (target) {
-                if (!Wh_SetFunctionHook(target, (void*)DwmSetWindowAttribute_Hook,
-                                        (void**)&DwmSetWindowAttribute_Original))
-                    Wh_Log(L"[networkux] the square-corners hook could not be installed");
-            } else {
-                Wh_Log(L"[networkux] DwmSetWindowAttribute not found: no square corners");
-            }
-        } else {
-            Wh_Log(L"[networkux] dwmapi.dll unavailable: no square corners");
-        }
-    } catch (...) {
-        Wh_Log(L"[networkux] square-corners setup exception");
-    }
-}
-
 // ---------------------------------------------------------------------------
 // This module's own thread
 //
@@ -9025,8 +8255,6 @@ static void TrayThreadWork(bool firstRun) {
         // Which process this is, in the terms the tray code uses: the private Windows 10
         // shell. Without this the redirect decisions answer "not our shell" and the tray
         // support never runs.
-        NativeUi::registryProcess = true;
-        NativeUi::explorerProcess = true;
         NativeUi::privateExplorer = IsPrivateExplorerProcess();
         Wh_Log(L"[flyout] process role: private shell=%d", NativeUi::privateExplorer ? 1 : 0);
         Wh_Log(L"[flyout] the Windows 10 tray is being restored in this shell "
@@ -9573,9 +8801,6 @@ BOOL Wh_ModInit() {
             // This process is the one that draws the flyout: it has to build it the Windows 10
             // way, otherwise the flyout it shows is torn down again after a moment.
             FlyoutHostPatch::Install();
-            // Experimental and off by default; see g_squareFlyoutCorners.
-            if (g_squareFlyoutCorners) InstallSquareCornersHook();
-            SquareShellWindowsNow();
             return TRUE;
         }
 
@@ -9608,18 +8833,8 @@ BOOL Wh_ModInit() {
         // Nothing outside Wh_ModInit touches the hook queue any more.
         InstallTraySupportHooks();
 
-        // Resolves the native (\REGISTRY\...) path of HKEY_CURRENT_USER once: IsExplorerPath
-        // (used by the EnableAutoTray virtual read) needs it, and it is cheap to always have
-        // ready rather than gate it behind a setting.
-        NativeUi::InitializeKeyPathSupport();
-
         // The click on the network icon: ShellExecuteW and ShellExecuteExW.
         InstallNetworkClickHooks();
-
-        // Experimental and off by default; see g_squareFlyoutCorners. On some builds the
-        // flyout host is this very process, so the hook is installed here too (in
-        // ShellExperienceHost the same call was made above).
-        if (g_squareFlyoutCorners) InstallSquareCornersHook();
 
         g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (!g_stopEvent) {
@@ -9653,12 +8868,6 @@ static bool JoinServicesThread(PCWSTR where) {
         waited = WaitForSingleObject(g_servicesThread, 100);
         if (waited == WAIT_OBJECT_0) break;
     }
-    if (waited != WAIT_OBJECT_0) {
-        Wh_Log(L"[flyout] the services thread did not stop within 10 s (%s): its handles are "
-               L"kept and nothing it owns is freed from another thread", where);
-        return false;
-    }
-    return true;
 }
 
 void Wh_ModBeforeUninit() {
@@ -9692,7 +8901,6 @@ void Wh_ModUninit() {
     }
     // The timed-out ShellExecute workers of this mod are joined here (bounded).
     ShellOpGuard::Shutdown();
-    NativeUi::stopping.store(true, std::memory_order_release);
     g_trayThreadId = 0;
     Wh_Log(L"[flyout] unloaded");
 }
