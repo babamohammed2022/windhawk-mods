@@ -177,6 +177,7 @@ left to dedicated mods.
 
 #include <windows.h>
 #include <Unknwn.h>
+#include <oaidl.h>      // IDispatch, DISPID, DISPPARAMS (the toggle of "show desktop")
 #include <combaseapi.h>
 #include <bcrypt.h>
 #include <wincrypt.h>
