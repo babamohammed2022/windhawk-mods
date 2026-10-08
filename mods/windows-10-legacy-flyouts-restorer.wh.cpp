@@ -2,7 +2,7 @@
 // @id              windows-10-legacy-flyouts-restorer
 // @name            Windows 10 legacy flyouts on Win11 24H2 restorer
 // @description     This mod restores the Windows 10 network icon and its flyout in the private Windows 10 shell, with the verified Windows 10 tray modules
-// @version         1.4.1
+// @version         1.0.0
 // @author          babamohammed
 // @github          https://github.com/babamohammed2022
 // @license         GPL-3.0
