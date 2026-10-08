@@ -136,131 +136,48 @@ bytes and import-table entries of x64 shell modules, which does not carry over t
 #undef _WINSOCKAPI_
 #endif
 #include <winsock2.h>
-#include <xamlom.h>
-#include <atomic>
-#include <array>
-#include <vector>
-#undef GetCurrentTime
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.Foundation.Collections.h>
-#include <winrt/Windows.UI.Xaml.h>
+
+#include <windows.h>
 #include <Unknwn.h>
 #include <combaseapi.h>
-#include <algorithm>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <list>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <random>
-#include <sstream>
-#include <string>
-#include <string_view>
-#include <type_traits>
-#include <unordered_map>
-#include <unordered_set>
-#include <variant>
-#include <initguid.h>
-#include <commctrl.h>
-#include <d2d1_1.h>
-#include <roapi.h>
-#include <windows.graphics.effects.h>
-#include <winstring.h>
-#include <winrt/Windows.Graphics.Effects.h>
-#include <winrt/Windows.Networking.Connectivity.h>
-#include <winrt/Windows.Storage.Streams.h>
-#include <winrt/Windows.System.Power.h>
-#include <winrt/Windows.System.h>
-#include <winrt/Windows.UI.Composition.h>
-#include <winrt/Windows.UI.Core.h>
-#include <winrt/Windows.UI.Text.h>
-#include <winrt/Windows.UI.ViewManagement.h>
-#include <dwmapi.h>
-#include <winrt/Windows.UI.Xaml.Controls.h>
-#include <winrt/Windows.UI.Xaml.Data.h>
-#include <winrt/Windows.UI.Xaml.Controls.Primitives.h>
-#include <winrt/Windows.UI.Xaml.Media.Animation.h>
-#include <winrt/Windows.UI.Xaml.Hosting.h>
-#include <winrt/Windows.UI.Xaml.Markup.h>
-#include <winrt/Windows.UI.Xaml.Media.Imaging.h>
-#include <winrt/Windows.UI.Xaml.Media.h>
-#include <exception>
-#undef INTERFACE
-#include <functional>
-#include <shellscalingapi.h>  // GetDpiForMonitor, MDT_DEFAULT
-#include <windows.h>
-#include <stdlib.h>
-#include <cstdint>
-#include <limits.h>
-#include <string.h>
+#include <bcrypt.h>
+#include <wincrypt.h>
+#include <wintrust.h>
 #include <wininet.h>
 #include <shellapi.h>
 #include <shlobj.h>     // SHParseDisplayName / SHOpenFolderAndSelectItems
-#include <wlanapi.h>    // interruttore Wi-Fi vero (riquadro in fondo al flyout)
-#include <iphlpapi.h>   // mappatura adattatori del fallback rete NLM
-#include <netlistmgr.h> // stato NLM per il fallback rete
+#include <commctrl.h>   // SetWindowSubclass, the subclasses of the shell's windows
+#include <strsafe.h>
+#include <tlhelp32.h>   // the snapshot of the process (loaded modules and such)
+#include <winternl.h>   // UNICODE_STRING for the LdrLoadDll hook
+#include <wlanapi.h>    // adapter and signal read of the NLM network fallback
+#include <iphlpapi.h>   // adapter mapping of the NLM network fallback
+#include <netlistmgr.h> // the NLM state of the network fallback
+#include <time.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <limits.h>
+
+// Only C++/WinRT's base header is used, and only for winrt::com_ptr and
+// winrt::hresult_error - the two types the NLM lookup and the class-factory
+// resolution are written with. No WinRT component header is included: MinGW's
+// toolchain ships winrt/base.h, while the component headers (for example
+// winrt/Windows.UI.Xaml.h) are not there and broke the build.
+#include <winrt/base.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <mutex>
+#include <string>
+#include <vector>
+
 #include <windhawk_api.h>
 #include <windhawk_utils.h>
-#include <winrt/Windows.Networking.NetworkOperators.h>
-#include <intrin.h>
 
-// The shell this module lives in. In the monolith g_unloading lived among the globals of
-// the shell-services section; here it is the only flag of that kind.
-static std::atomic<bool> g_unloading{false};
-
-// Options of this module. They are read once and copied into the fields of the monolith
-// configuration the tray/menu code already uses (g_cfg), so those blocks stay as they are.
-static bool g_logTrayActivity = false;
-
-// ---------------------------------------------------------------------------
-// EXPERIMENTAL (1.3.9), off by default: square window corners for the flyouts of
-// ShellExperienceHost.exe through DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_DONOTROUND.
-// It causes no errors (the log shows DWM answering 0x00000000 for the window of the network
-// flyout, class Windows.UI.Core.CoreWindow, title "Network connections"), but it does NOT
-// work: the corners of the flyout stay rounded, most likely because they are drawn by the
-// XAML of the page and not by the window. Left here, disabled, for anyone who knows why.
-// ---------------------------------------------------------------------------
-static bool g_squareFlyoutCorners = false;
-static bool g_squareCornersHookInstalled = false;
-
-static int ClampInt(int value, int low, int high) {
-    if (value < low) return low;
-    if (value > high) return high;
-    return value;
-}
-
-// Legacy component headers stay at global scope.
-#undef INTERFACE
-#include <windows.h>
-#include <stdlib.h>
-#include <cstdint>
-#include <limits.h>
-#include <roapi.h>
-#include <winstring.h>
-#include <string.h>
-#include <wininet.h>
-#include <aclapi.h>
-#include <wintrust.h>
-#include <softpub.h>
-#include <wincrypt.h>
-#include <bcrypt.h>
-#include <string>
-#include <atomic>
-#include <mutex>
-#include <unordered_set>
-#include <vector>
-#include <winternl.h>   // UNICODE_STRING for the LdrLoadDll hook
-#include <time.h>
-#include <commctrl.h>   // sottoclasse di finestre (SetWindowSubclass)
-#include <tlhelp32.h>   // fotografia dei processi (moduli caricati, ecc.)
-#include <shellapi.h>
-#include <shlobj.h>     // SHParseDisplayName / SHOpenFolderAndSelectItems
-#include <wlanapi.h>    // interruttore Wi-Fi vero (riquadro in fondo al flyout)
-#include <iphlpapi.h>   // mappatura adattatori del fallback rete NLM
-// The code resolves IP Helper dynamically; keep these stable GetAdaptersAddresses
-// flags available even when an SDK target macro hides their declarations.
+// The code resolves IP Helper dynamically; keep these stable GetAdaptersAddresses flags
+// available even when an SDK target macro hides their declarations.
 #ifndef GAA_FLAG_SKIP_ANYCAST
 #define GAA_FLAG_SKIP_ANYCAST 0x00000002
 #endif
@@ -270,502 +187,24 @@ static int ClampInt(int value, int low, int high) {
 #ifndef GAA_FLAG_SKIP_DNS_SERVER
 #define GAA_FLAG_SKIP_DNS_SERVER 0x00000008
 #endif
-#include <netlistmgr.h> // stato NLM per il fallback rete
-#include <windhawk_api.h>
-#include <windhawk_utils.h>
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.UI.Xaml.h>
-#include <winrt/Windows.UI.Xaml.Controls.h>
-#include <winrt/Windows.UI.Xaml.Media.h>
-#include <winrt/Windows.UI.Core.h>
-#include <winrt/Windows.Foundation.Collections.h>
-#include <winrt/Windows.Networking.Connectivity.h>
-#include <winrt/Windows.Networking.NetworkOperators.h>
-#include <winrt/Windows.UI.Xaml.Hosting.h>
-#include <algorithm>
-#include <shellscalingapi.h>
 
-// Original legacy-component history (not release documentation):
-//
-// MODIFICHE (2026-10-07) - 1.0.1 (Action Center removed from this mod):
-// - The Action Center button (ShowActionCenterButton/ActionCenterConflict), its
-//   slide-in/slide-out/close-delay animation (ActionCenterAnimation and its three timing
-//   settings), its diagnostics probe, and the (already dead, never wired to a value-read
-//   hook) virtual UseLiteLayout / DisableNotificationCenter registry policy and the dead
-//   notification crash-fix hook are all removed: the user now manages the Action Center
-//   with a separate, dedicated mod, and this mod no longer touches it in any way. The
-//   experimental square-corners feature (DwmSetWindowAttribute_Hook, InstallSquareCornersHook)
-//   is kept exactly as it was: it targets the network/battery flyout windows of
-//   ShellExperienceHost.exe, not the Action Center panel, and only shared the DWM hook
-//   infrastructure with the removed animation, which has now been split apart.
-// - The 6 corresponding settings are removed from the settings block, and the 4
-//   already-unused g_cfg fields left over from an earlier iteration of the animation
-//   (actionCenterAnimation/actionCenterAnimInMs/actionCenterAnimOutMs/
-//   actionCenterCloseDelayMs, never read anywhere) are removed as well.
-// - NativeUi::InstallKeyHooks/OpenKeyHook/CloseKeyHook/TryRead/Cleanup and the
-//   RegOpenKeyExW/RegCloseKey hooks they installed are removed (they only ever served the
-//   Action Center virtualization above, and, being never actually wired into a live
-//   value-read hook, never served a value to anything). What NativeUi needs for the
-//   unrelated, still-live EnableAutoTray virtual read (IsExplorerPath) is kept, in a new,
-//   minimal NativeUi::InitializeKeyPathSupport() called from Wh_ModInit.
-// - The README/@description no longer mentions the Action Center button or its animation.
-//
-// MODIFICHE CANDIDATE (2026-10-04) - 1.0.0 (bootstrap PNI path-gated):
-// - Il log utente di 1.0.0 mostra SHEnableServiceObject -> S_OK prima che il redirect
-//   di stobject.dll verso ProgramData risulti nella traccia. La chiamata viene ora rinviata
-//   finché pnidui.dll e stobject.dll mappate corrispondono ai percorsi privati attesi;
-//   il class-factory lookup usa anch'esso solo i moduli privati e gli hash kTrayFiles sono
-//   riverificati prima dell'SSO. Se un basename era già caricato da un altro percorso, la
-//   copia fissata viene richiesta esplicitamente e il risultato viene verificato. Niente
-//   patch allo stobject di sistema o all'Explorer nativo.
-// - Non viene applicata la patch Windows-To-Go-slot pensata per stobject 26100: questo
-//   candidato fissa stobject 10.0.19041.7664 (SHA-256 7c0037535c4da20ae15b4df9662f9330a989d4e2f36284aac5c9c3bce429e118).
-//   Nel file fissato il sentinel Windows-To-Go non è presente; è presente il CLSID del
-//   Network Tray SSO, quindi la riscrittura 26100 non è trasferibile a questa DLL.
-// - Il servizio SSO viene richiesto solo se la DLL fissata e' quella attesa e il
-//   CLSID risolve; senza callback PNI il fallback resta fail-closed (nessun URI).
-//
-// MODIFICHE CANDIDATE (2026-10-04) - 1.0.0:
-// - verboseDiagnostics defaults to false: repetitive XAML/property/style traces and
-//   the optional notification-database probe require an explicit opt-in. Its copied
-//   files, SQLite connection and statements are RAII-managed; payloads are never read
-//   or logged, while operational errors remain visible.
-// - ActionCenterEntranceAnimation is limited to the private Explorer and qualifying
-//   ShellExperienceHost/ShellHost CoreWindows. It derives the first-open endpoint
-//   from live monitor/work-area/DPI/window geometry, animates on RAII-owned workers,
-//   preserves the native DWM result on exception, and drains workers before unload.
-// - Hook state changes only for non-duplicate transitions; a failed initial placement
-//   restores the closed state, and exception fallback never calls DWM twice.
-// - New runtime trace still has no PNIHiddenWnd/NIM_ADD. The network icon remains
-//   fail-closed until a verified pnidui click callback can open the Win10 flyout.
-//   The name is resolved through the variant table and the probe logs the outcome.
-//
-// MODIFICHE AGGIUNTE (2026-10-07) - 1.0.0 (revisione pre-pubblicazione: via il ricambio del
-// pulsante e la pelle grafica delle azioni rapide; licenza):
-// - NetworkUxHostPatch e NetworkUxSkin (le voci 1.3.5 e 1.3.7 qui sotto: il ricambio del nome
-//   del pulsante di NetworkUX.dll e la pelle grafica del dizionario di risorse) sono stati
-//   tolti da questo mod. Le tre tessere delle azioni rapide (Wi-Fi, modalita' aereo, hotspot)
-//   restano quindi con il pulsante, la misura e lo stile di Windows 11; non rispondono ancora
-//   al clic. Il motivo: quella parte e' ancora in lavorazione (il dizionario di risorse della
-//   pagina non espone sempre le chiavi attese nello stesso momento) e il revisore della mod ha
-//   chiesto di non lasciare un modulo (NetworkUX.dll) fissato in memoria per una funzione non
-//   ancora conclusa. Una mod dedicata, separata da questa, riprendera' il lavoro sulle tessere.
-// - Il ricambio del set di template di Windows.UI.QuickActions.dll (FlyoutHostPatch,
-//   PatchQuickActionsTemplates, voce 1.3.4 qui sotto) RESTA: senza di lui il flyout di rete e
-//   quello della batteria non si costruiscono affatto su questi build (si disfano un istante
-//   dopo essere apparsi, e la pagina della batteria puo' far cadere il processo). Non e' la
-//   stessa cosa del ricambio del pulsante appena tolto, e non si tocca.
-// - @license portato a GPL-3.0 (prima assente): il file tiene ancora codice adattato da
-//   explorer-frame-classic di m417z (GPL-3.0, il blocco BlockXamlAdapter) e dalla correzione dei
-//   template di ExplorerPatcher (GPL-2.0, PatchQuickActionsTemplates qui sopra). GPL-3.0 e' la
-//   licenza che i due rispettano entrambi senza bisogno di sapere se ExplorerPatcher consente
-//   "o versioni successive".
-// MODIFICHE AGGIUNTE (2026-10-06) - 1.3.8 (il flyout costruito a meta' dopo un ricaricamento del
-// mod, e il modulo che non deve piu' sparire: contenuto invece di flag, e modulo fissato in
-// memoria):
-// - Difetto corretto: dopo che Windhawk ricarica il mod in un processo gia' avviato
-//   (ShellExperienceHost.exe, il processo che disegna i flyout), il flyout di rete tornava a
-//   essere costruito a meta' - pulsanti inerti, e nei casi peggiori la finestra disfatta subito.
-//   La patch dei byte in Windows.UI.QuickActions.dll resta scritta in memoria perche'
-//   Wh_ModBeforeUninit non la annulla (e non deve annullarla: rimettere i byte originali mentre
-//   la shell disegna un flyout lo farebbe costruire di nuovo col set di Windows 11 e cadere),
-//   mentre i flag della copia nuova del mod sono nuovi e valgono zero: la ricerca del sito con la
-//   maschera intatta non lo trovava piu' (l'indice 6 vuole la 0xE8 della "call LoadComponent",
-//   che li' e' stata sostituita da cinque NOP) e la funzione usciva con "nothing is patched".
-//   TemplatesPatched() restava falso, quindi la pagina del flyout di rete non riceveva mai il
-//   nome del pulsante di Windows 10 (QuickToggleWinuiFluentTemplate) e restava col nome di
-//   Windows 11, che il set di Windows 10 non conosce.
-// - La correzione legge il CONTENUTO del modulo invece dei flag (A, B, C del giro):
-//   * B - nella stessa posizione si cerca anche la forma che porta GIA' la patch, con una copia
-//     della maschera in cui sono liberi solo i gruppi che questa patch riscrive (indici 6-10,
-//     52-59 e 74-77: nel file 7-10 e 74-77 erano gia' '?', quindi cambiano davvero l'indice 6 e
-//     gli indici 52-59). Se il sito si trova cosi', e i cinque NOP ci sono e gli otto byte del
-//     caricatore vecchio corrispondono, lo stato viene preso com'e': g_patched torna vero
-//     ("already carries the Windows 10 template set") e non si scrive nulla. La ricerca della
-//     forma intatta resta la prima, cosi' le due strade non si confondono.
-//   * C - via il fermo "se g_patched esci subito" (diceva "l'ho fatto io", non "il modulo in
-//     memoria e' riscritto") e via il fermo su g_redirected nel blocco di rete: la voce della
-//     tabella delle importazioni di NetworkUX.dll viene riconosciuta dal suo contenuto (punta
-//     gia' alla funzione di questo mod?) e la decisione non usa mai l'indirizzo di base del
-//     modulo, che ASLR puo' riassegnare a una copia nuova.
-//   * Se il sito c'e' ma i suoi byte non sono ne' la forma intatta ne' quella riscritta, non si
-//     scrive niente e il log lo dice: una build sconosciuta non viene toccata.
-// - A - il modulo viene fissato in memoria con GetModuleHandleExW e
-//   GET_MODULE_HANDLE_EX_FLAG_PIN (piu' GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, con la base del
-//   modulo come indirizzo): documentazione Microsoft, "the module stays loaded until the process
-//   terminates, regardless of the number of calls to FreeLibrary", e il conteggio dei
-//   riferimenti non viene incrementato (nessun FreeLibrary da fare, e non se ne fa nessuno). E'
-//   la risposta al caso che la documentazione di CoFreeUnusedLibrariesEx descrive: una DLL COM
-//   il cui DllCanUnloadNow risponde S_OK puo' essere scaricata quando il ritardo e' scaduto
-//   (dieci minuti per impostazione predefinita), e una copia nuova non porterebbe nulla di
-//   quello che il mod ha fatto. Il pin si fa dopo che la patch e' stata scritta O riconosciuta
-//   gia' presente, mai quando i pattern non si trovano; non e' reversibile e vive solo in
-//   ShellExperienceHost.exe, e il log lo scrive.
-// - Diagnostica: le righe di [flyout-host] e [networkux] portano ora la base del modulo e
-//   l'esito (written now / already carries the template set / site unknown / not found / pinned),
-//   con i contatori limitati come nel resto del file. Nessuna impostazione nuova, nessun valore
-//   di registro, nessuna pagina, nessun modulo caricato dal mod, e i menu contestuali, il
-//   vassoio, la batteria e l'Action Center restano come sono.
-// MODIFICHE AGGIUNTE (2026-10-06) - 1.3.7 (la pelle grafica del flyout di rete: le regole
-// del file "10Flyouts v4.5" che si possono scrivere nel dizionario di risorse):
-// - Richiesta di questo giro: applicare la pelle grafica del file allegato
-//   (uploads/10Flyouts v4.5.txt) al flyout di rete. Quel file e' un elenco di regole
-//   scritte per il motore di una mod di stile ("Windows 11 Notification Center Styler"):
-//   ogni regola nomina un elemento dell'albero XAML per nome e posizione, e quel motore le
-//   va a scrivere elemento per elemento. Questo mod non porta quel motore dentro di se' -
-//   non prende in mano l'albero XAML di un altro programma, non fa da ponte verso un
-//   motore esterno e non finge di averlo: le regole che nominano i singoli controlli della
-//   pagina (bordo del LogonFrame, fondo acrilico, collegamento "Impostazioni" e la sua
-//   descrizione, indicatore di selezione della lista delle reti, margini dei pulsanti,
-//   caratteri) restano fuori, e il log lo dice.
-// - Quello che si applica e' la parte che vive nel dizionario di risorse della pagina, la
-//   stessa che ExplorerPatcher scrive nella sua NetworkUX_PatchResourceDictionary (chiamata
-//   subito dopo NetworkUX::App::LoadResourceDictionaries): i valori di Windows 10.
-//   * QuickActionPanelMargin = Thickness(12,0,0,12) - il margine del pannello delle azioni
-//     rapide (Windows 11 usa 12,0,24,0).
-//   * QuickActionControlStyle - la misura del singolo pulsante: Margin 4,0,0,4, Width 90,
-//     Height 64 (Windows 11: 12,0,0,0 e 96x90). Si toccano solo i tre setter della misura e
-//     solo quando lo stile non e' ancora in uso (sealed): gli altri setter restano dove
-//     sono, e uno stile gia' usato non si forza.
-//   * ControlCornerRadius e OverlayCornerRadius a 0 - la documentazione Microsoft li chiama
-//     raggi d'angolo globali ("You can override these values in your App.xaml to change the
-//     rounding across all controls in your app"). E' il punto in cui il "CornerRadius=0"
-//     che il file chiede su bordi, pulsanti, caselle e barre di scorrimento si puo' chiedere
-//     per tutti.
-//   * FocusVisualPrimaryThickness e FocusVisualSecondaryThickness a 0, quando questa build
-//     li tiene nel dizionario: il file li azzera su griglie, pulsanti e link, ed e' la stessa
-//     cosa che la comunita' usa per togliere il rettangolo bianco dai flyout di Windows 10
-//     su Windows 11 ("10FlyoutFix").
-// - Un valore si sostituisce solo se il tipo che c'e' regge quello nuovo (il tipo si legge
-//   dal valore presente, non si indovina); le due chiavi dei raggi d'angolo si aggiungono
-//   quando non ci sono, perche' e' la loro stessa documentazione a dire che si
-//   sovrascrivono cosi'. In tutti gli altri casi non si scrive niente.
-// - Come si applica: dalla voce di 1.3.5 (la chiamata WindowsCreateStringReference di
-//   NetworkUX.dll). E' la pagina stessa a chiamare, quindi il filo e' quello che disegna il
-//   flyout e il momento e' il suo; il dizionario arriva mentre la pagina si costruisce,
-//   quindi finche' le sue chiavi non ci sono si riprova alla chiamata dopo (al massimo
-//   qualche decina di tentativi, poi si smette). Il punto in cui ExplorerPatcher si aggancia
-//   per scrivere il dizionario (NetworkUX::App::LoadResourceDictionaries, in
-//   chunk-skin-pattern.inc) si legge con lo stesso pattern, ma NON viene agganciato: il mod
-//   registra tutti i suoi hook in Wh_ModInit (vedi la nota li') e questa parte non tocca la
-//   coda degli hook, non aggiunge impostazioni, non legge e non scrive il registro e non
-//   carica nessun modulo.
-// MODIFICHE AGGIUNTE (2026-10-06) - 1.3.6 (compilazione: la voce presa da combase.dll; via i
-// menu contestuali che duplicano altre mod):
-// - Compilazione: GetProcAddress restituisce FARPROC, non un void*, e il compilatore di
-//   Windhawk (clang) non lo converte da solo. La voce WindowsCreateStringReference presa da
-//   combase.dll viene ora passata con un cast esplicito, come il file fa gia' per le altre
-//   voci prese allo stesso modo (LoadLibraryW, LdrLoadDll, DwmSetWindowAttribute):
-//   "cannot initialize a variable of type 'void *' with an rvalue of type 'FARPROC'".
-// - Via le voci della disposizione delle finestre dal menu della barra: "Sovrapponi le
-//   finestre", "Mostra le finestre in pila", "Mostra le finestre affiancate" e "Mostra
-//   desktop" non vengono piu' aggiunte. Erano ricostruite da questo mod (CascadeWindows,
-//   TileWindows, l'oggetto Shell) e le gestisce un'altra mod.
-// - Via la cascata "Cerca" (Search) sotto "Toolbars", con le sue tre voci: non viene piu'
-//   inserita nel menu della barra, ne' in quello dell'orologio, ne' in quello dell'indicatore
-//   di lingua. Con lei se ne vanno la memoria virtuale del valore SearchboxTaskbarMode e la
-//   scrittura del modo di ricerca.
-// - Via le due voci del menu dell'orologio ("Regola data/ora" e "Personalizza icone di
-//   notifica") e il menu di ripiego dell'orologio: se la shell non mostra un menu per
-//   l'orologio, questo mod non ne mostra uno suo.
-// - Via il percorso del menu Win+X della mod: la risposta alla richiesta (che nel log si
-//   vedeva come "Win+X request on the Win10 taskbar") e il messaggio privato che la portava.
-//   Resta il controllo che lascia il menu nativo quando il clic e' sul pulsante Start: quel
-//   menu lo mostra un altro modulo, e questo mod non deve sostituirlo con quello della barra.
-// - Non cambia nient'altro, e in particolare la logica dei menu contestuali resta la sua: il
-//   menu della barra e' ancora quello di Windows 10 ricostruito dalla risorsa di shell32
-//   (Task Manager, Blocca la barra delle applicazioni, Impostazioni della barra delle
-//   applicazioni), il menu di rete e' ancora quello della pnidui consegnato alla pnidui
-//   stessa, il menu della batteria porta ancora le due voci di stobject, il menu del pulsante
-//   Mostra desktop tiene "Mostra desktop" e Aero Peek, e i menu di destra delle icone del
-//   vassoio e il disegno immersivo restano come prima. Nessuna impostazione nuova, nessun
-//   valore di registro nuovo, nessuna pagina aperta.
-// MODIFICHE AGGIUNTE (2026-10-06) - 1.3.5 (i pulsanti del flyout di rete tornano quelli di
-// Windows 10; il mod prende in prestito le risorse con RAII):
-// - Il set di template di Windows 10 della 1.3.4 non basta da solo nel processo che disegna il
-//   flyout. La pagina del flyout di rete (NetworkUX.dll) chiede il pulsante delle azioni rapide
-//   con il nome del template di Windows 11 ("ToggleButtonWinuiFluentTemplate"): con quel nome
-//   il pulsante del set di Windows 10 non viene mai usato e i pulsanti restano blocchi di testo
-//   inerti - ExplorerPatcher lo scrive accanto alla stessa correzione ("If we're doing the
-//   quick actions patch but not this, they will only appear as non-interactive text blocks").
-//   La 1.3.4 faceva quindi meta' del ricambio, ed e' il pezzo che manca perche' il flyout si
-//   disegni a ogni clic e non una volta sola. La 1.3.5 fa la stessa cosa della sua
-//   HandleLoadedNetworkUX: la voce della tabella delle importazioni di NetworkUX.dll che chiama
-//   WindowsCreateStringReference viene mandata a una funzione di questo mod, che cambia quel
-//   solo nome in "QuickToggleWinuiFluentTemplate" (il pulsante di Windows 10), e soltanto se in
-//   questo processo il set di template di Windows 10 e' stato davvero applicato.
-// - NetworkUX.dll non viene caricato da questo mod: si prende se e' gia' presente, o quando la
-//   shell lo carica - lo stesso avviso (LdrLoadDll) che prende Windows.UI.QuickActions.dll.
-//   Del modulo si tocca una sola voce della tabella delle importazioni: nient'altro.
-// - Le due meta' valgono in ogni processo che disegna il flyout, non nel primo che ci riesce:
-//   ogni ShellExperienceHost.exe che la shell avvia prende il set di template di Windows 10 e il
-//   nome del pulsante di Windows 10, perche' il mod li applica in quel processo quando i due
-//   moduli arrivano (o subito, se li ha gia' caricati quando il mod parte). Nessun fermo "una
-//   volta sola" tra un clic e l'altro, nessun altro processo toccato.
-// - RAII (chiesto in questo giro): ScopedWriteProtect rende scrivibile una pagina e la rimette
-//   com'era quando esce di scena (anche uscendo prima, con return, o con un'eccezione C++), e
-//   ScopedImportRedirect fa lo stesso con la voce della tabella delle importazioni - che quindi
-//   torna al valore di prima quando il mod si scarica (Wh_ModBeforeUninit). Il ricambio dei
-//   template della 1.3.4 usa lo stesso ScopedWriteProtect al posto della coppia di
-//   VirtualProtect scritta a mano.
-// - Dal file "10Flyouts v4.5" dell'utente (le sue regole per il flyout di rete) questo giro
-//   applica la parte che riguarda i pulsanti delle azioni rapide: le regole su
-//   QuickActions.QuickToggleButtonDesktopWinuiFluent sono esattamente il pulsante "QuickToggle"
-//   di Windows 10 che qui si torna a usare, e le regole sul set di template sono quelle che la
-//   1.3.4 aveva gia' ripreso (il set di Windows 10 nel processo dei flyout).
-//   Le regole che restano riguardano i controlli dentro la pagina (i bordi del LogonFrame, il
-//   fondo acrilico, i margini, l'indicatore di selezione della lista delle reti, i rettangoli
-//   del focus): agiscono sull'albero XAML e arrivano con la revisione successiva, con lo stesso
-//   riferimento di ExplorerPatcher (NetworkUX_PatchResourceDictionary, chiamata subito dopo
-//   NetworkUX::App::LoadResourceDictionaries). Qui non si inventa nulla e non si stravolge
-//   niente: niente impostazioni nuove, nessun registro, nessuna pagina, nessuna DLL caricata a
-//   forza.
-// MODIFICHE AGGIUNTE (2026-10-06) - 1.3.4 (il flyout si apre e resta aperto; la batteria si
-// riconosce dal suo GUID):
-// - Il flyout non si chiude piu' dopo un istante. Il processo che disegna i flyout
-//   (ShellExperienceHost.exe) costruiva il flyout di Windows 10 con il set di template nuovo
-//   ("Control Center") di Windows.UI.QuickActions.dll, che esiste da Windows 11 build 25951 e
-//   con cui il flyout di Windows 10 non si costruisce: la finestra si apriva e veniva disfatta
-//   subito (e la batteria faceva cadere il processo mentre lo costruiva). In quel modulo
-//   cinque byte diventano NOP, otto byte vengono copiati dal vecchio caricatore di template e
-//   la chiamata che segue viene puntata li': e' la stessa correzione di ExplorerPatcher per
-//   queste build ("Fix battery flyout crashing on 25951+"), applicata al modulo che la shell
-//   ha caricato.
-// - La 1.3.3 caricava quel modulo con LoadLibraryW all'avvio del processo dei flyout: la
-//   chiamata fallisce (error 1114, "not available" nel log) perche' la shell lo carica dopo.
-//   La 1.3.4 non lo carica: sorveglia i caricamenti del processo (LdrLoadDll) e cambia il
-//   modulo appena compare, prima che la shell ci costruisca qualcosa. Se i pattern non si
-//   trovano non viene scritto nulla e il log lo dice.
-// - Il clic sull'icona della batteria ora arriva. La batteria non si registra con un testo
-//   (registrazione con testo vuoto) e non sta in una finestra di servizio della pnidui: in
-//   questa build e' su SystemTray_Main (il log della 1.3.3 lo mostra: id 1225, guid
-//   {7820AE75-...}, testo ""), quindi il riconoscimento per suggerimento non la prendeva mai e
-//   la presa del clic non si armava: nessuna riga [battery] nel log e nessun flyout. Ora
-//   l'icona si riconosce dal suo GUID - che non dipende dalla lingua del sistema - e il clic
-//   viene preso sulla finestra dove quella registrazione e' arrivata, qualunque sia.
-// - La presa del clic della batteria tocca solo quell'icona: il messaggio di richiamo porta in
-//   wParam l'id dell'icona, e un clic che arriva senza di esso vale solo se cade dentro il
-//   rettangolo dell'icona (Shell_NotifyIconGetRect). Le altre icone della stessa finestra non
-//   vengono toccate.
-// - Il clic resta consumato e non apre nient'altro: nessuna pagina, nessun flyout Win32 e
-//   nessun valore di registro; la chiamata e' quella autentica della shell Windows 10
-//   (GetExperienceManager(L"Windows.Internal.ShellExperience.TrayBatteryFlyout") ->
-//   QueryInterface(IID_TrayBatteryFlyoutExperienceManager) -> ShowFlyout(rect)).
-// - La 1.3.3 resta com'era per il resto: tre tile rimosse, nessuna impostazione nuova, hook
-//   registrati mentre Wh_ModInit gira secondo la documentazione Windhawk.
-// MODIFICHE AGGIUNTE (2026-10-06) - 1.3.3 (batteria: flyout Windows 10 autentico):
-// - Via la risposta in memoria a UseWin32BatteryFlyout: quello era il flyout Win32 di
-//   stobject.dll, cioe' il comportamento compatibile con Windows 7, non il flyout di
-//   Windows 10. Nessun valore di registro viene piu' letto o risposto.
-// - Il clic sinistro sull'icona della batteria viene preso sulla finestra di servizio di
-//   stobject.dll e consumato: il gestore di stobject non lo vede mai. Il flyout che si apre
-//   e' quello della shell Windows 10, chiamato come lo chiama la shell stessa:
-//   GetExperienceManager(L"Windows.Internal.ShellExperience.TrayBatteryFlyout") ->
-//   QueryInterface(IID_TrayBatteryFlyoutExperienceManager) -> ShowFlyout(rect), con il
-//   rettangolo dell'icona preso da Shell_NotifyIconGetRect. E' la stessa strada autentica del
-//   flyout di rete, non una pagina e non un flyout Win32.
-// - Se la chiamata non riesce non viene avviato nulla (nessuna pagina, nessun flyout Win32,
-//   nessun valore di registro) e il log nomina il passo che ha fallito.
-// - Il flyout resta aperto. ShellExperienceHost.exe e' il processo che disegna il flyout, e
-//   decide come disegnarlo con una funzione di Windows.UI.QuickActions.dll (la sua modalita'
-//   "remodel"): in quella modalita' il flyout di Windows 10 viene costruito e disfatto subito
-//   dopo, ed e' il "si apre per qualche secondo e si chiude". Quando il mod parte dentro quel
-//   processo fa rispondere quella funzione come risponde Windows 10: il flyout viene disegnato
-//   e resta a schermo. E' la stessa correzione di ExplorerPatcher; i due byte vengono cambiati
-//   solo quando il pattern e' trovato esattamente una volta, altrimenti non si scrive niente e
-//   il log lo dice.
-// - Compilazione: la procedura della finestra dell'icona viene prima del namespace della
-//   batteria, quindi la richiesta del flyout della batteria e' dichiarata dove il file dichiara
-//   gia' ShowNetworkIconMenuHere (prima era "no member named 'BatteryFlyout' in namespace
-//   'RestorerTaskbar::NetworkTrayForce'"), e #include <winsock2.h> non produce piu' l'avviso
-//   "Please include winsock2.h before windows.h" portato dal compilatore del mod.
-// - La 1.3.2 resta com'era per il resto: tre tile rimosse, nessuna impostazione nuova,
-//   ciclo di vita degli hook secondo la documentazione Windhawk.
-// MODIFICHE AGGIUNTE (2026-10-03) - 1.0.0 (bootstrap SSO + fallback dinamico, candidato):
-// - Il log runtime fornito per 1.0.0 mostra pnidui.dll caricata e l'attivazione SSO, ma
-//   non PNIHiddenWnd né una network NIM_ADD con il GUID 7820AE74; `.73` e `.75` sono
-//   volume/alimentazione. La candidata carica pnidui.dll prima di stobject.dll e intercetta
-//   soltanto il CLSID Network Tray SSO
-//   nell'Explorer privato, forza i soli read di ReplaceVan/VANFromPCSettings a 0
-//   e prova SHEnableServiceObject dopo che la taskbar privata esiste. CoCreateInstance viene instradata alla factory della pnidui.dll Windows 10 fissata e il
-//   log registra caller/HRESULT; la tabella SSO non viene patchata e non si duplicano slot.
-//   networkux.dll (le tre tile del flyout di rete) e' stato rimosso del tutto nella 1.3.2;
-//   NetworkFlyout torna alla normale attivazione PNI/shell.
-// - Se e solo se pnidui ha tentato NIM_ADD con un PNIHiddenWnd del modulo pnidui e un vero
-//   callback message, un NIM_ADD nativo fallito o privo di HICON abilita il fallback dinamico
-//   NLM: risorse RT_GROUP_ICON autentiche della DLL fissata, stato NLM + tipo/segnale
-//   adattatore, GUID di rete di sistema e stessa identità/callback PNI. Il clic passa al
-//   gestore PNI originale; il mod non crea WndProc/URI/Settings come destinazione. Il fatto
-//   che il gestore apra il flyout sul build bersaglio resta da verificare. Senza callback PNI
-//   il fallback non registra alcuna icona. `try/catch`, RAII per HICON, DLL, WLAN memory/handle e
-//   apartment COM; modifiche limitate all'Explorer privato. Nessun codice EP riutilizzato;
-//   `ep_taskbar` non ispezionato/decompilato. Il nome viene verificato a runtime (log).
-//
-// MODIFICHE AGGIUNTE (2026-10-03) - 1.0.0 (icona nativa / URL esatto):
-// - Su segnalazione dell'utente, rimosso lo shim sintetico: la voce nativa compare
-//   nella pagina Notification Area Icons ma non nella taskbar ripristinata.
-// - "Personalizza icone di notifica" lancia soltanto l'URL esatto
-//   shell:::{05d7b0f4-2121-4eff-bf6b-ed3f69b894d9}; niente PIDL alternativo né
-//   fallback a ms-settings:taskbar. La traccia PNI resta solo diagnostica.
-// - Report ricevuti: Explorer 10.0.19039.1 -> RPCRT4.dll 10.0.26100.6899,
-//   AV 0xC0000005 offset 0xB0A4; ShellHost -> local@..._unloaded, AV offset
-//   0x589E0. Senza dump/stack non si identifica il chiamante né si attribuisce
-//   la causa a RPCRT4 o a un hook. Il sorgente locale non è stato compilato da noi;
-//   il log runtime fornito è marcato 1.0.0.
-//
-// MODIFICHE AGGIUNTE (2026-10-03) - 1.0.0 (shim candidato, dopo il feedback):
-// - L'utente segnala che l'icona resta assente con la candidata 1.0.0: rimosso il
-//   tentativo esplicito di avvio SSO/IOleCommandTarget; non viene presentato come fix.
-// - Nell'Explorer privato, una finestra owner nascosta del mod registra un'icona
-//   NIM_ADD caricata dal gruppo RT_GROUP_ICON 3048 della pnidui.dll Windows 10
-//   hash-pinned. Il file è mappato come risorsa dati; LookupIconIdFromDirectoryEx
-//   seleziona la variante adatta alla tray e CreateIconFromResourceEx ne crea l'HICON.
-// - Il callback sinistro apre ms-availablenetworks:;
-//   TaskbarCreated re-registra l'icona. Reset RAII esegue NIM_DELETE, DestroyIcon,
-//   DestroyWindow e UnregisterClass. Try/catch nei punti di callback e cleanup.
-// - Il tracking Shell_NotifyIconW è installato prima di caricare pnidui.dll e marca
-//   la registrazione nativa solo dopo un NIM_ADD riuscito. Se l'icona PNI nativa
-//   compare, lo shim rimuove la propria per evitare duplicati; ricontrolla anche
-//   la classe HWND e ritenta una rimozione fallita. Il message pump dispatcha i
-//   callback della finestra nascosta e TaskbarCreated. Il glifo è statico: non
-//   indica tipo o intensità del collegamento.
-//   Solo Explorer privato; questa funzione non scrive HKLM, non riusa codice EP e
-//   non ispeziona/decompila ep_taskbar. Candidata 1.0.0 poi ritirata.
-//
-// MODIFICHE AGGIUNTE (2026-10-03) - 1.0.0 (tentativo SSO superato, non confermato):
-// - Il log 1.0.0 mostrava pnidui.dll caricata e IClassFactory::CreateInstance
-//   riuscita, ma non PNIHiddenWnd né NIM_ADD. Il ciclo OLECMDID_NEW/SAVE era un
-//   tentativo clean-room per distinguere la creazione COM dall'avvio del servizio.
-// - L'utente ha poi confermato che l'icona non è apparsa; questa strada è stata
-//   abbandonata in favore dello shim 1.0.0. Non dichiarare la patch SSO riuscita.
-//
-// MODIFICHE AGGIUNTE (2026-10-03) - 1.0.0:
-// - La sola LoadLibrary di pnidui.dll non avvia necessariamente l'icona di rete:
-//   la shell deve attivare il Network Tray SSO ({C2796011-81BA-4148-8FCA-C6643245113F}).
-//   Nella shell privata il mod attiva direttamente la classe COM dalla fabbrica
-//   della pnidui.dll verificata; mantiene l'IUnknown per tutta la vita del thread
-//   STA a coda messaggi, poi lo rilascia prima di CoUninitialize (winrt::com_ptr,
-//   RAII). Nessuna scrittura HKLM, scansione di .rdata o patch di strutture
-//   private di stobject.dll; percorso isolato alla shell Windows 10 privata.
-// - Se la DLL o la classe non sono pronte all'avvio, il tentativo COM viene
-//   ripetuto ogni 5 s fino a 60 s, con HRESULT nel log. Il thread STA viene
-//   avviato anche quando sono disattivati gli altri servizi, finché provideTrayDlls
-//   è attivo; il SSO viene attivato solo nel processo Explorer privato. Le chiamate
-//   COM sono protette da try/catch e il class factory usa winrt::com_ptr; la
-//   callback che cerca PNIHiddenWnd ora restituisce davvero la finestra senza
-//   subclass laterali.
-//
-// MODIFICHE AGGIUNTE (2026-10-03) - 1.0.0:
-// - Diagnostica del vassoio: all'avvio della shell privata la mod scrive per
-//   esteso cosa contiene la cartella dati (pnidui.dll, stobject.dll: presenti con
-//   la dimensione, oppure mancanti) e avvisa se un
-//   modulo del vassoio non e' stato caricato. Se un modulo manca, il
-//   caricamento viene ritentato ogni 10 s per un minuto invece di lasciare
-//   l'icona assente per tutta la sessione (l'icona di rete e il suo fumetto
-//   sono creati da pnidui.dll caricata da questa mod nella shell di Windows 10:
-//   senza la mod attiva in quel processo non esistono).
-// - La riga di log [restorer] riporta la versione effettiva: prima diceva
-//   sempre 1.0.0 anche dopo l'aggiornamento.
-//
-// MODIFICHE AGGIUNTE (2026-10-03) - 1.0.0:
-// - Tentata correzione di WIN+X: di default la chord resta alla shell di Windows 10
-//   (nessun RegisterHotKey MOD_WIN, nessun hook low-level installato). L'opzione
-//   winXMenu=custom riattiva il menu localizzato della mod, che non consuma la chord,
-//   lascia ~350 ms di priorita' al menu nativo e usa una finestra owner creata dal
-//   thread che mostra il menu. Il comportamento resta noto come non funzionante
-//   sull'hardware provato: non va considerato un fix confermato (vedi Known Issues).
-// - Sezione SehTiles riscritta in modo indipendente: le sequenze di byte sono
-//   espresse come descrittori di istruzione annotati (un byte per voce, con
-//   l'istruzione che codificano) e ogni bersaglio risolto e' validato a runtime
-//   prima di scrivere. Nessun codice, commento, identificatore o tabella e'
-//   tratto da ExplorerPatcher (GPL-2.0), che resta citato solo per la tecnica.
-// - README corretto: lo stato reale dei test (eseguiti su macchina fisica, non in
-//   VM), i limiti noti (rotazione non supportata) e la nuova sezione "Licensing"
-//   con la licenza effettiva di ogni componente upstream.
-//
-// MODIFICHE AGGIUNTE (2026-10-02):
-// - Aggiunto menu WIN+X completo con tutte le voci standard (17 voci)
-// - Aggiunta voce "Cerca" al menu contestuale della lingua (ITA/ENG/ESP)
-// - Implementato fallback per WIN+X con menu personalizzato se il nativo fallisce
-// - Usato RAII (ScopedMenu) e try-catch per la gestione degli errori
-// - Supporto multilingua per 10 lingue (IT, EN, FR, ES, DE, PT, NL, RU, JA, PL)
-// - Tutte le API usate sono pubbliche (user32.dll, shell32.dll)
-//
-// ---------------------------------------------------------------------------
-// WHAT THIS MOD DOES (and what it does NOT do)
-//
-//  userinit.exe (shell redirection):
-//   1. prepares the data folder with the binaries downloaded from the Microsoft
-//      symbol server and VERIFIES them (pinned SHA-256 + Authenticode signature
-//      + build gate) before they are used;
-//   2. redirects reads of the "Shell" value to the private copy;
-//   3. also writes the per-user Shell value (HKCU): when Windows honours it the
-//      legacy shell starts without going through the logon path (see the note
-//      further down);
-//  explorer.exe (legacy taskbar fixes inside the private copy only):
-//   4. path spoof (GetModuleFileNameW), as in the "Fake Explorer path" mod;
-//      v0.8.0 also hooks native explorer for the configurable ribbon and Alt+Tab.
-//      Tray patches and path spoof stay private-shell-only.
-//   5. taskbar context menu fix (LoadMenuW): Windows 10 Search cascade below
-//      Toolbars plus the four classic entries (cascade, stacked, side by side,
-//      show the desktop), with documented registry/menu APIs;
-//   5b. language indicator context menu: adds "Search" entry to the ITA/ENG/ESP
-//       menu with multilingual support;
-//   6. (removed in 1.3.9) language indicator colours: now the separate mod
-//      "windows-10-language-flyout-guard";
-//   7. notification crash fix, enabled on the verified runtime build when a
-//      known offset exists; otherwise DisableNotificationCenter is virtual only
-//      in the relevant process and registry reads;
-//   8. unloading clears that virtual fallback without changing a real policy;
-//   9. click on the network icon: ms-settings:network -> ms-availablenetworks:;
-//   9b. right click on the network icon: pnidui is given resource 3014 (the
-//       Windows 10 menu, "Troubleshoot problems" / "Open Network & Internet
-//       settings"), which is missing on 24H2 because it lives in the MUI;
-//  10. taskbar watchdog + emergency hotkey Ctrl+Alt+Shift+R;
-//  11. anti-loop guard: after three failed starts the native shell is restored;
-//  12. tray module strings (battery included) served in place of their .mui,
-//      which is not part of the data folder: the same gap that left the network
-//      icon without a menu (resource 3014);
-//  13. (removed in 1.3.9) the language indicator cell painting: see item 6;
-//  14. popup menu supervision (TrackPopupMenu/Ex): it says whether the battery
-//      menu is missing because the click never arrives or because the menu is
-//      shown empty;
-//  15. unloading: the return to the Windows 11 shell is prepared by
-//      Wh_ModBeforeUninit and performed by a detached script. No ExitProcess in
-//      the mod unload path (Windhawk frees the DLL with a single FreeLibrary as
-//      soon as Wh_ModUninit returns: removing the process there leaves the UI on
-//      "Uninitializing...");
-//  16. battery context menu: the two Windows 10 entries (commands 101 and 102)
-//      are appended when the shell's own strings for ids 150/151 come up empty;
-//  17. (removed in 1.3.9) language guard: now in "windows-10-language-flyout-guard";
-//  18. (removed in 1.3.9) indicator cell background: see item 6;
-//  19. UWP apps (Settings, Calculator, Store, ...) on the taskbar: SPERIMENTALE e
-//      spento per default (g_cfg.fixUwpTaskbar). Quando e' acceso, explorer is told
-//      to treat ApplicationFrameWindow as a normal window (build-gated hook, see
-//      the UwpTaskbar section) and a helper thread keeps the buttons in step with
-//      the cloaked / un-cloaked state of the frames through ITaskbarList.
-//
-// DOES NOT do: Start menu or delivered Windows 11 notifications, integration
-// with Windows 11 shell components. The Search submenu configures the standard
-// Windows 10 per-user taskbar-search mode; the actual search host remains a
-// Windows component and is not bundled or injected by this mod.
-//
-// In short: if anything fails verification the mod does not touch the shell and
-// the native shell stays (fail-closed). No shortcut of this mod can leave the
-// machine without a shell: there is always a way back to the Windows 11 shell
-// (guard, watchdog, hotkey), exactly as in the 4.2.0 mod these parts come from.
-// ---------------------------------------------------------------------------
+// The shell this module lives in. In the monolith g_unloading lived among the globals of
+// the shell-services section; here it is the only flag of that kind.
+static std::atomic<bool> g_unloading{false};
 
-// MSVC-only intrinsic declaration; headers must remain outside namespaces.
+// Options of this module. They are read once and copied into the fields of the monolith
+// configuration the tray/menu code already uses (g_cfg), so those blocks stay as they are.
+static bool g_logTrayActivity = false;
+
+// _ReturnAddress is what the caller of a hook is read with; clang and gcc have the
+// builtin, MSVC needs the intrinsic header.
 #if defined(_MSC_VER) && !defined(__clang__) && !defined(__GNUC__)
 #include <intrin.h>
 #endif
 
-// The mod uses C++ exception boundaries only. It does not register a VEH, use
-// Microsoft structured-exception syntax, rewrite CONTEXT records, or claim to recover from native faults.
-// Keep this namespace at global scope: Wh_ModInit uses it below.
-#include <tlhelp32.h>
-
+// The exception boundaries of this mod: C++ try/catch only. No VEH is registered, no
+// structured-exception syntax is used, no CONTEXT record is rewritten, no recovery from a
+// native fault is claimed. The namespace stays at global scope: Wh_ModInit uses it.
 namespace CppGuard {
 
 static constexpr DWORD kCppExceptionCode = 0xE06D7363u;
@@ -820,74 +259,50 @@ static bool IsLegacyShellProcess();
 // CONFIGURAZIONE
 // ===========================================================================
 
-struct BuildInfo {
-    const wchar_t* label;
-    const wchar_t* symbolId;      // <timestamp><SizeOfImage>, as on the symbol server
-    const wchar_t* sha256;        // real hash of the file served by msdl (verified)
-    DWORD timeDateStamp;          // gate di build
-    DWORD sizeOfImage;
-    DWORD shellManagedOffset;     // ShouldTreatShellManagedWindowAsNotShellManaged (0 = unknown)
-};
-
-static const BuildInfo kBuilds[] = {
-    // 10.0.19039.1 — used by the official mod and by the community fixes
-    { L"10.0.19039.1", L"7AC6EEC3442000", L"58f78b5f90efc75d6c7d3d85bc8b36983fe410406f217619dbe2384130d65bfe", 0x7AC6EEC3, 0x442000, 0x4FEA8 },
-    // 10.0.19041.7725 (KB5122878, September 2026) — more recent; the log says which is installed
-    { L"10.0.19041.7725", L"7A77DC0C5c9000", L"c493059ca065b0780ce5a430ade23f74c79c9578ec49c1fb18d7ad3f81dfec5e", 0x7A77DC0C, 0x5C9000, 0x5F0E0 },
-};
-static const int kBuildCount = _countof(kBuilds);
-
-// Extra legacy files. windows.ui.search.dll is deliberately not loaded: the
-// Search submenu below changes the standard SearchboxTaskbarMode setting through
-// public Win32 APIs and does not inject a separate Search host. Its verified
-// identity is retained for reference: id = 4D6D1C59e5000,
-// sha256 = 8950639236b5000973ff14f7a57577066f4c075a52e8582fe11b8eb75526522e.
-struct ExtraFile {
+// One file of the store: the name it has on disk, the symbol id, the pinned hash.
+struct PinnedFile {
     const wchar_t* name;
     const wchar_t* symbolId;
     const wchar_t* sha256;
 };
-static const ExtraFile kTrayFiles[] = {
+
+// The two tray modules, asked for by every load of those names in the private shell.
+static const PinnedFile kTrayFiles[] = {
+    // pnidui.dll 10.0.19041.7663, stobject.dll 10.0.19041.7663 - the Windows 10 builds of the
+    // network icon and of the battery / volume tray pair.
     { L"pnidui.dll",  L"CC2D6BBC219000", L"7c8fa315e73e22c0d66c1b424118e3441251fe3c0e2b557e4dbf16166d14411c" },
     { L"stobject.dll", L"465AE25A52000", L"7c0037535c4da20ae15b4df9662f9330a989d4e2f36284aac5c9c3bce429e118" },
 };
 
+// explorer.exe 10.0.19039.1 - the private Windows 10 shell, the same file the taskbar mod
+// downloads. It is not loaded here, only made sure to exist: the taskbar mod starts it.
+static const PinnedFile kExplorerFile = {
+    L"explorer.exe", L"7AC6EEC3442000",
+    L"58f78b5f90efc75d6c7d3d85bc8b36983fe410406f217619dbe2384130d65bfe",
+};
+
+// windows.ui.search.dll is deliberately not loaded: the Search submenu changes the standard
+// SearchboxTaskbarMode setting through public Win32 APIs and does not inject a separate Search
+// host. Its verified identity is retained for reference: id = 4D6D1C59e5000,
+// sha256 = 8950639236b5000973ff14f7a57577066f4c075a52e8582fe11b8eb75526522e.
+
 static const wchar_t* kSymbolUrlFmt = L"https://msdl.microsoft.com/download/symbols/%s/%s/%s";
 
 static struct {
-    int  buildIndex;
-    wchar_t storePath[MAX_PATH];
-    wchar_t explorerPath[MAX_PATH];
-    bool provideTrayDlls;
-    bool requireSignature;
-    bool fixContextMenu;
-
-    bool winXMenuAnchorCursor;   // 1.0.0: legacy cursor anchor instead of the Start button
-    int  winXMenuOffsetX;        // 1.0.0: shift of the resolved anchor point (px)
-    int  winXMenuOffsetY;
-    bool fixUwpTaskbar;          // UWP apps (ApplicationFrameWindow) on the taskbar
-    bool spoofExplorerPath;
-    bool perUserShellRedirect;
-    bool shellRedirectHook;
-    bool restoreOnUnload;
-    bool emergencyHotkey;
-    int  liveSwitch;             // 0 none, 1 to-legacy, 2 to-win11
-    bool watchdog;
-    bool languageGuard;          // sezione 9: sopprime il flyout di lingua all'avvio
+    wchar_t storePath[MAX_PATH];       // the verified files, shared with the taskbar mod
+    wchar_t explorerPath[MAX_PATH];    // storePath\explorer.exe, the private shell
+    bool provideTrayDlls;              // download + load pnidui.dll / stobject.dll
+    bool requireSignature;             // a file whose signature fails is not used
     int  downloadTimeoutSec;
-    bool tightenStoreAcl;
-    bool forceWin11StartLeft;
-    // 1.0.0
-    bool forceNetworkTrayIcon;             // registra l'icona di rete se la PNI nativa non lo fa
-    int  forceNetworkTrayDelaySec;         // attesa prima dell'intervento (s)
-    bool forceNetworkTrayResetTraySettings;// azzera una volta lo stato della barra (con backup)
-    bool trayRestoreOverflowChevron;       // 1.0.0: rimuove l'override virtuale per rivedere il pulsante "^"
-    int  shellOpGuardTimeoutMs;            // tetto di tempo per le operazioni shell:::
+    bool forceNetworkTrayIcon;             // register the network icon if pnidui never does
+    int  forceNetworkTrayDelaySec;         // how long to wait before stepping in (s)
+    bool forceNetworkTrayResetTraySettings;// clear the stored tray state once, with a backup
+    int  shellOpGuardTimeoutMs;            // time cap of a shell::: operation
 } g_cfg = {};
 
-static bool g_userinitReady = false;   // tutti i file verificati → possiamo reindirizzare
-static wchar_t g_realExePath[MAX_PATH] = {};   // real path, captured before the hooks
-static DWORD g_explorerTs = 0, g_explorerImageSize = 0;
+// The real path of the running image, captured before the hooks that can spoof it. Every
+// "am I the private shell?" answer comes from this.
+static wchar_t g_realExePath[MAX_PATH] = {};
 
 // ===========================================================================
 // RAII
@@ -984,9 +399,8 @@ private:
 // ===========================================================================
 
 namespace NativeUi {
-static std::atomic<bool> ribbon10{true};
-static bool registryProcess = false;
-static bool explorerProcess = false;
+// Only the process role is kept here: every other member of this namespace (the ribbon gate,
+// the registry virtualization and its key-path helpers) had no caller left and is removed.
 static bool privateExplorer = false;
 
 
@@ -1061,7 +475,7 @@ static SigResult VerifyMicrosoftSignature(const wchar_t* path, bool* signerIsMic
     WINTRUST_DATA data = {};
     data.cbStruct = sizeof(data);
     data.dwUIChoice = WTD_UI_NONE;
-    data.fdwRevocationChecks = WTD_REVOKE_NONE;   // offline: nessuna rete al logon
+    data.fdwRevocationChecks = WTD_REVOKE_NONE;   // offline: no network at logon
     data.dwUnionChoice = WTD_CHOICE_FILE;
     data.pFile = &fileInfo;
     data.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_REVOCATION_CHECK_NONE;
@@ -1116,20 +530,51 @@ static SigResult VerifyMicrosoftSignature(const wchar_t* path, bool* signerIsMic
     return SigResult::Ok;
 }
 
+// A download must never hold up the unload of the mod.
+//
+// The downloads run on this mod's services thread and a single call here can block for the
+// whole connect/receive timeout. Wh_ModBeforeUninit may not return while that thread runs -
+// Windhawk unmaps the module right after, and the thread would execute code that is gone - so
+// the session handle of the download in progress is published here: the unload takes it over
+// and closes it, which makes the blocked call return. The exchange gives the handle to exactly
+// one of the two parties, so it is never closed twice. On top of that the read loop looks at
+// g_unloading between the chunks, so a download that is making progress stops at the next one.
+static std::atomic<HINTERNET> g_downloadSession{nullptr};
+
+static void CancelActiveDownload() noexcept {
+    try {
+        const HINTERNET session = g_downloadSession.exchange(nullptr, std::memory_order_acq_rel);
+        if (!session) return;
+        Wh_Log(L"[dl] the mod is being unloaded: the download in progress is cancelled");
+        InternetCloseHandle(session);
+    } catch (...) {
+    }
+}
+
 static bool HttpDownloadToFile(const wchar_t* url, const wchar_t* destPath, DWORD timeoutSec) {
-    ScopedInternet session(InternetOpenW(L"Win10TaskbarClean/0.2",
-                                         INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0));
-    if (!session.valid()) {
+    if (g_unloading.load(std::memory_order_acquire)) return false;   // nothing starts while unloading
+
+    HINTERNET session = InternetOpenW(L"Win10TaskbarClean/0.2", INTERNET_OPEN_TYPE_PRECONFIG,
+                                       nullptr, nullptr, 0);
+    if (!session) {
         Wh_Log(L"[dl] InternetOpen failed (%lu)", GetLastError());
         return false;
     }
+    g_downloadSession.store(session, std::memory_order_release);
+    struct ScopedSession {
+        std::atomic<HINTERNET>& slot;
+        HINTERNET self;
+        ~ScopedSession() {
+            if (slot.exchange(nullptr, std::memory_order_acq_rel) == self) InternetCloseHandle(self);
+        }
+    } sessionGuard{g_downloadSession, session};
 
     DWORD ms = (timeoutSec ? timeoutSec : 20) * 1000;
-    InternetSetOptionW(session.get(), INTERNET_OPTION_CONNECT_TIMEOUT, &ms, sizeof(ms));
-    InternetSetOptionW(session.get(), INTERNET_OPTION_RECEIVE_TIMEOUT, &ms, sizeof(ms));
-    InternetSetOptionW(session.get(), INTERNET_OPTION_SEND_TIMEOUT, &ms, sizeof(ms));
+    InternetSetOptionW(session, INTERNET_OPTION_CONNECT_TIMEOUT, &ms, sizeof(ms));
+    InternetSetOptionW(session, INTERNET_OPTION_RECEIVE_TIMEOUT, &ms, sizeof(ms));
+    InternetSetOptionW(session, INTERNET_OPTION_SEND_TIMEOUT, &ms, sizeof(ms));
 
-    ScopedInternet request(InternetOpenUrlW(session.get(), url, nullptr, 0,
+    ScopedInternet request(InternetOpenUrlW(session, url, nullptr, 0,
                                             INTERNET_FLAG_NO_UI | INTERNET_FLAG_RELOAD, 0));
     if (!request.valid()) {
         Wh_Log(L"[dl] opening the URL failed (%lu): %s", GetLastError(), url);
@@ -1150,10 +595,14 @@ static bool HttpDownloadToFile(const wchar_t* url, const wchar_t* destPath, DWOR
         return false;
     }
 
-    const DWORD kMaxBytes = 64u * 1024u * 1024u;   // limite di sanita'
+    const DWORD kMaxBytes = 64u * 1024u * 1024u;   // a sanity limit
     BYTE buffer[64 * 1024];
     DWORD total = 0;
     for (;;) {
+        if (g_unloading.load(std::memory_order_acquire)) {
+            Wh_Log(L"[dl] unloading: the download is interrupted after %lu bytes", total);
+            return false;
+        }
         DWORD got = 0;
         if (!InternetReadFile(request.get(), buffer, sizeof(buffer), &got)) {
             Wh_Log(L"[dl] read failed (%lu)", GetLastError());
@@ -1203,8 +652,13 @@ static bool EnsureVerifiedFile(const wchar_t* dir, const wchar_t* fileName,
     wchar_t temp[MAX_PATH] = {};
     _snwprintf_s(temp, _countof(temp), _TRUNCATE, L"%s.part", target);
 
+    if (g_unloading.load(std::memory_order_acquire)) return false;
     Wh_Log(L"[dl] downloading %s ...", url);
     if (!HttpDownloadToFile(url, temp, (DWORD)g_cfg.downloadTimeoutSec)) {
+        DeleteFileW(temp);
+        return false;
+    }
+    if (g_unloading.load(std::memory_order_acquire)) {
         DeleteFileW(temp);
         return false;
     }
@@ -1264,15 +718,7 @@ static bool ContainsNoCase(const wchar_t* haystack, const wchar_t* needle) {
 #define IDM_MOD_PEEK          0x7C75
 
 
-static bool IsSeparatorItem(HMENU menu, int pos) {
-    MENUITEMINFOW mii = {};
-    mii.cbSize = sizeof(mii);
-    mii.fMask = MIIM_FTYPE;
-    return menu && GetMenuItemInfoW(menu, pos, TRUE, &mii) && (mii.fType & MFT_SEPARATOR);
-}
-
-
-// Forward declarations needed by ShowBatteryMenu (defined further below).
+// Forward declaration needed by ShowBatteryMenu (defined further below).
 static bool HandleClassicMenuCommand(UINT id);
 
 // === MULTI-LANGUAGE SUPPORT for tray context menus (battery, network,
@@ -1582,7 +1028,7 @@ static void Prepare(Session& s, HMENU menu) noexcept {
         MENUITEMINFOW set = {};
         set.cbSize = sizeof(set);
         set.fMask = MIIM_FTYPE | MIIM_DATA;
-        set.fType = info.fType | MFT_OWNERDRAW;        // l'inverso di ApplyClassicMenu
+        set.fType = info.fType | MFT_OWNERDRAW;   // the opposite of ApplyClassicMenu
         set.dwItemData = reinterpret_cast<ULONG_PTR>(data);
         SetMenuItemInfoW(menu, i, TRUE, &set);
         if (info.hSubMenu) Prepare(s, info.hSubMenu);
@@ -1590,7 +1036,7 @@ static void Prepare(Session& s, HMENU menu) noexcept {
     MENUINFO mi = {};
     mi.cbSize = sizeof(mi);
     mi.fMask = MIM_BACKGROUND;
-    mi.hbrBack = s.brush;                               // sfondo del tema, non nullo
+    mi.hbrBack = s.brush;                     // the background of the theme, never null
     SetMenuInfo(menu, &mi);
 }
 
@@ -1883,12 +1329,12 @@ static void ShowBatteryMenu(HWND serviceWindow) {
     // non riceve il tema corretto (e può non chiudersi cliccando fuori).
     SetForegroundWindow(themeOwner);
 
-    const BOOL scelta = static_cast<BOOL>(
+    const BOOL picked = static_cast<BOOL>(
         ImmersiveMenu::Track(menu, themeOwner, pt.x, pt.y, TPM_RIGHTBUTTON));
     DestroyMenu(menu);
-    if (!scelta) return;
+    if (!picked) return;
 
-    const UINT cmd = (UINT)(UINT_PTR)scelta;
+    const UINT cmd = (UINT)(UINT_PTR)picked;
     UINT realId = 0;
     switch (cmd) {
         case IDM_MOD_BATTERY_POWER:    realId = 101; break;
@@ -2391,10 +1837,12 @@ struct OpenUriCall {
 static void OpenUriBody(void* raw) {
     OpenUriCall* call = static_cast<OpenUriCall*>(raw);
     SetLastError(0);
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const HINSTANCE result = ShellExecuteW(nullptr, L"open", call->uri,
                                            nullptr, nullptr, SW_SHOWNORMAL);
     call->code = reinterpret_cast<INT_PTR>(result);
     call->error = GetLastError();
+    if (SUCCEEDED(co)) CoUninitialize();
 }
 
 static void DeleteOpenUriCall(void* raw) { delete static_cast<OpenUriCall*>(raw); }
@@ -2420,7 +1868,7 @@ static bool OpenShellUriGuarded(const wchar_t* uri, const wchar_t* what) noexcep
         Wh_Log(L"[shell-guard] %s: context cannot be allocated", what);
         return false;
     }
-    wcsncpy_s(call->uri, uri, _TRUNCATE);   // copia: il worker puo' sopravvivere al chiamante
+    wcsncpy_s(call->uri, uri, _TRUNCATE);   // copy: the worker can outlive its caller
     if (!call->uri[0]) { delete call; return false; }
 
     const WorkSpec spec{ OpenUriBody, call, DeleteOpenUriCall, ResultOfOpenUriCall };
@@ -2454,10 +1902,12 @@ struct RunCommandCall {
 static void RunCommandBody(void* raw) {
     RunCommandCall* call = static_cast<RunCommandCall*>(raw);
     SetLastError(0);
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);   // see OpenUriBody
     const HINSTANCE result = ShellExecuteW(nullptr, call->verb, call->file, call->params,
                                            nullptr, SW_SHOWNORMAL);
     call->code = reinterpret_cast<INT_PTR>(result);
     call->error = GetLastError();
+    if (SUCCEEDED(co)) CoUninitialize();
 }
 
 static void DeleteRunCommandCall(void* raw) { delete static_cast<RunCommandCall*>(raw); }
@@ -2575,9 +2025,9 @@ static bool HandleClassicMenuCommand(UINT id) {
             break;
         }
 
-        case IDM_MOD_BATTERY_POWER:
-        case IDM_MOD_BATTERY_MOBILITY:
-            return true;
+        // The two entries of the battery menu are not handled here: ShowBatteryMenu maps
+        // them onto the power commands of stobject itself. Claiming the id and doing nothing
+        // used to leave the caller with a menu that reported a command that never ran.
         default:
             return false;
         }
@@ -2591,120 +2041,10 @@ static bool HandleClassicMenuCommand(UINT id) {
     }
 }
 
-// --- network icon menu: pnidui's resource 3014 ------------------------------
-// Evidence (pnidui.dll 10.0.19041.7663, disassembled):
-//   on right click pnidui calls LoadMenuW(<pnidui>, 3014), takes
-//   submenu 0, shows it with TrackPopupMenu and handles the entries itself
-//   0x0C23 (3107) e 0x0C25 (3109).
-// Resource 3014 is NOT inside pnidui.dll (the DLL has icons only): it is in
-// its MUI, pnidui.dll.mui, which no longer exists on 24H2. Without the MUI LoadMenuW
-// returns NULL, pnidui leaves the handler and the right click opens nothing:
-// that is the cause of the missing menu.
-// Here the resource is handed back to it, byte for byte as in the official
-// Windows 10 MUI (10.0.19041.1): 140 bytes for Italian, 142 for English.
-// The format is the resource format, so LoadMenuIndirectW is fine.
-// If it fails to load, the same structure is rebuilt (two entries, same ids)
-// with AppendMenuW: pnidui finds the menu it expects anyway.
-static int g_netMenuGiven = 0;
-
-// Build the network right-click menu (pnidui resource 3014) in the user's
-// UI language. Binary templates kept for IT/EN (byte-exact MUI copies);
-// other languages built by hand with AppendMenuW using multilingual tables.
-// Command ids (3107 troubleshoot, 3109 settings) are pnidui's native ids.
-// 140 bytes - Italian MUI 10.0.19041.1
-static const unsigned char kNetMenu3014_it[] = {
-    0x00, 0x00, 0x00, 0x00, 0x90, 0x00, 0x5F, 0x00, 0x50, 0x00, 0x4F, 0x00,
-    0x50, 0x00, 0x5F, 0x00, 0x55, 0x00, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x23, 0x0C, 0x52, 0x00, 0x69, 0x00, 0x73, 0x00, 0x6F, 0x00, 0x6C, 0x00,
-    0x75, 0x00, 0x7A, 0x00, 0x69, 0x00, 0x6F, 0x00, 0x6E, 0x00, 0x65, 0x00,
-    0x20, 0x00, 0x70, 0x00, 0x72, 0x00, 0x6F, 0x00, 0x62, 0x00, 0x6C, 0x00,
-    0x65, 0x00, 0x6D, 0x00, 0x69, 0x00, 0x00, 0x00, 0x80, 0x00, 0x25, 0x0C,
-    0x41, 0x00, 0x70, 0x00, 0x72, 0x00, 0x69, 0x00, 0x20, 0x00, 0x69, 0x00,
-    0x6D, 0x00, 0x70, 0x00, 0x6F, 0x00, 0x73, 0x00, 0x74, 0x00, 0x61, 0x00,
-    0x7A, 0x00, 0x69, 0x00, 0x6F, 0x00, 0x6E, 0x00, 0x69, 0x00, 0x20, 0x00,
-    0x52, 0x00, 0x65, 0x00, 0x74, 0x00, 0x65, 0x00, 0x20, 0x00, 0x65, 0x00,
-    0x20, 0x00, 0x49, 0x00, 0x6E, 0x00, 0x74, 0x00, 0x65, 0x00, 0x72, 0x00,
-    0x6E, 0x00, 0x65, 0x00, 0x74, 0x00, 0x00, 0x00,
-};
-// 142 bytes - English MUI 10.0.19041.1
-static const unsigned char kNetMenu3014_en[] = {
-    0x00, 0x00, 0x00, 0x00, 0x90, 0x00, 0x5F, 0x00, 0x50, 0x00, 0x4F, 0x00,
-    0x50, 0x00, 0x5F, 0x00, 0x55, 0x00, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x23, 0x0C, 0x54, 0x00, 0x72, 0x00, 0x6F, 0x00, 0x75, 0x00, 0x62, 0x00,
-    0x6C, 0x00, 0x65, 0x00, 0x73, 0x00, 0x68, 0x00, 0x6F, 0x00, 0x6F, 0x00,
-    0x74, 0x00, 0x20, 0x00, 0x70, 0x00, 0x72, 0x00, 0x6F, 0x00, 0x62, 0x00,
-    0x6C, 0x00, 0x65, 0x00, 0x6D, 0x00, 0x73, 0x00, 0x00, 0x00, 0x80, 0x00,
-    0x25, 0x0C, 0x4F, 0x00, 0x70, 0x00, 0x65, 0x00, 0x6E, 0x00, 0x20, 0x00,
-    0x4E, 0x00, 0x65, 0x00, 0x74, 0x00, 0x77, 0x00, 0x6F, 0x00, 0x72, 0x00,
-    0x6B, 0x00, 0x20, 0x00, 0x26, 0x00, 0x26, 0x00, 0x20, 0x00, 0x49, 0x00,
-    0x6E, 0x00, 0x74, 0x00, 0x65, 0x00, 0x72, 0x00, 0x6E, 0x00, 0x65, 0x00,
-    0x74, 0x00, 0x20, 0x00, 0x73, 0x00, 0x65, 0x00, 0x74, 0x00, 0x74, 0x00,
-    0x69, 0x00, 0x6E, 0x00, 0x67, 0x00, 0x73, 0x00, 0x00, 0x00,
-};
-
-static HMENU BuildNetworkIconMenu() {
-    const UiLangId lang = DetectUiLang();
-    const unsigned char* tpl = (lang == LANG_IT) ? kNetMenu3014_it
-                              : (lang == LANG_EN) ? kNetMenu3014_en : nullptr;
-    if (tpl) {
-        HMENU menu = LoadMenuIndirectW((const void*)tpl);
-        if (menu) return menu;
-    }
-    HMENU bar = CreateMenu();
-    HMENU popup = CreatePopupMenu();
-    if (!bar || !popup) {
-        if (bar) DestroyMenu(bar);
-        if (popup) DestroyMenu(popup);
-        return nullptr;
-    }
-    AppendMenuW(popup, MF_STRING, 3107, kNetTroubleshoot[lang]);
-    AppendMenuW(popup, MF_STRING, 3109, kNetOpenSettings[lang]);
-    AppendMenuW(bar, MF_POPUP | MF_STRING, (UINT_PTR)popup, L"");
-    return bar;
-}
-
-static HMENU WINAPI LoadMenuW_Hook(HINSTANCE hInstance, LPCWSTR lpMenuName) {
-    try {
-        // pnidui's resource 3014: it is the right-click menu of the network icon
-        HMODULE pnidui = GetModuleHandleW(L"pnidui.dll");
-        if (pnidui && IS_INTRESOURCE(lpMenuName) && (HMODULE)hInstance == pnidui &&
-            (UINT)(ULONG_PTR)lpMenuName == 3014) {
-            HMENU net = BuildNetworkIconMenu();
-            if (net) {
-                if (g_netMenuGiven < 3) {
-                    g_netMenuGiven++;
-                    Wh_Log(L"[network] network icon menu handed to pnidui (resource 3014: troubleshoot + settings)");
-                }
-                return net;
-            }
-            Wh_Log(L"[network] resource 3014 not loaded: pnidui stays without a menu");
-        }
-        if (IS_INTRESOURCE(lpMenuName) && (HMODULE)hInstance == GetModuleHandleW(nullptr) && g_shell32) {
-            UINT id = (UINT)(ULONG_PTR)lpMenuName;
-            if (id == 205 || id == 206) {
-                // Il menu del pulsante Start (Win+X) resta quello nativo: quando il clic
-                // e' sul pulsante Start la risorsa dell'eseguibile non viene sostituita.
-                // Quel menu e' di un altro modulo: questo mod non lo tocca.
-                if (!IsWinXNativeContextMenuRequest()) {
-                    HMENU result = LoadMenuW_Original(g_shell32, MAKEINTRESOURCEW(205));
-                    if (result) {
-                        EnhanceTaskbarMenu(result);   // covered by the try/catch of this function
-                        return result;
-                    }
-                }
-            }
-        }
-
-    } catch (...) {
-        Wh_Log(L"[menu] exception, using the original resource");
-    }
-    return LoadMenuW_Original(hInstance, lpMenuName);
-}
-
-// --- 3) language indicator fix: removed from this mod (1.3.9). It lives in the separate
-// mod "windows-10-language-flyout-guard"; the hooks it needed were never registered here.
-// --- 5) network: guarded routing for non-PNI network launches --------------
-// The old generic workaround can still rewrite a network-settings launch from
+// --- language indicator fix: removed from this mod. It lives in the separate mod
+// "windows-10-language-flyout-guard"; the hooks it needed were never registered here.
+// --- network: guarded routing for non-PNI network launches --------------
+// the old generic workaround can still rewrite a network-settings launch from
 // another caller. A click delivered to pnidui's real PNIHiddenWnd is different:
 // PNI-origin URI fallbacks are blocked below, and the dynamic icon fallback
 // never installs its own click handler or launches a URI.
@@ -2782,7 +2122,7 @@ static HINSTANCE WINAPI ShellExecuteW_Hook(HWND hwnd, LPCWSTR operation, LPCWSTR
 
 typedef BOOL(WINAPI* ShellExecuteExW_t)(SHELLEXECUTEINFOW*);
 static ShellExecuteExW_t ShellExecuteExW_Original = nullptr;          // aggancio globale
-static ShellExecuteExW_t ShellExecuteExW_TargetedOriginal = nullptr;  // aggancio mirato (IAT di pnidui)
+static ShellExecuteExW_t ShellExecuteExW_TargetedOriginal = nullptr;  // the targeted hook (IAT of pnidui)
 
 static BOOL HandleNetworkShellExecute(SHELLEXECUTEINFOW* info, ShellExecuteExW_t original,
                                       bool fromPnidui) {
@@ -2832,6 +2172,10 @@ static std::atomic<bool> g_pniduiShellExecuteExResolved{false};
 static void** g_pniduiShellExecuteExIatSlot = nullptr;
 
 static void TryHookPniduiShellExecuteExIat(const wchar_t* reason) {
+    // While the mod is going away the entry must not be taken any more - the restore
+    // runs on the unload path, and a write landing after it would leave the IAT of pnidui
+    // pointing into an image that is about to be unmapped.
+    if (g_unloading.load(std::memory_order_acquire)) return;
     if (g_pniduiShellExecuteExResolved.load(std::memory_order_acquire)) return;
     HMODULE pnidui = GetModuleHandleW(L"pnidui.dll");
     if (!pnidui) return;
@@ -2877,14 +2221,21 @@ static void TryHookPniduiShellExecuteExIat(const wchar_t* reason) {
 // Rimette la voce della IAT di pnidui com'era prima, mentre il modulo e' ancora caricato:
 // chiamata da Wh_ModBeforeUninit, sullo stesso filo, prima che il motore tolga gli hook.
 static void RestorePniduiShellExecuteExIatOnUnload() noexcept {
-    if (!g_pniduiShellExecuteExIatSlot || !ShellExecuteExW_TargetedOriginal) return;
+    void** slot = g_pniduiShellExecuteExIatSlot;
+    if (!slot || !ShellExecuteExW_TargetedOriginal) return;
+    g_pniduiShellExecuteExIatSlot = nullptr;
     DWORD oldProtect = 0;
-    if (VirtualProtect(g_pniduiShellExecuteExIatSlot, sizeof(void*), PAGE_READWRITE,
-                       &oldProtect)) {
-        *g_pniduiShellExecuteExIatSlot =
-            reinterpret_cast<void*>(ShellExecuteExW_TargetedOriginal);
+    if (VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &oldProtect)) {
+        // The entry is put back only if it still points at this mod's hook. Anything
+        // else that was written there in the meantime (by this mod or by another one) is left
+        // alone: overwriting it would hand the caller something that is not the original.
+        const void* original = reinterpret_cast<const void*>(ShellExecuteExW_TargetedOriginal);
+        if (InterlockedCompareExchangePointer(slot, const_cast<void*>(original),
+                                              reinterpret_cast<void*>(&ShellExecuteExW_TargetedHook)) ==
+            reinterpret_cast<void*>(&ShellExecuteExW_TargetedHook))
+            FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void*));
         DWORD ignored = 0;
-        VirtualProtect(g_pniduiShellExecuteExIatSlot, sizeof(void*), oldProtect, &ignored);
+        VirtualProtect(slot, sizeof(void*), oldProtect, &ignored);
     }
 }
 
@@ -2906,7 +2257,58 @@ static bool InstallShellExecuteExHooks() {
     return installed;
 }
 
-// 1.3.2: the two entry points of the click are registered here, once, and only from
+// --- the right-click menu of the native network icon: pnidui's resource 3014 -----
+// evidence (pnidui.dll 10.0.19041.7663, disassembled): on a right click pnidui calls
+// LoadMenuW(<pnidui>, 3014), takes submenu 0, shows it with TrackPopupMenu and handles
+// the two entries itself (3107 troubleshoot problems, 3109 open network settings).
+// Resource 3014 is not inside pnidui.dll but in its MUI, and this build ships no MUI
+// for it: LoadMenuW returns NULL, pnidui stops there, and the right click opens nothing.
+// The menu is therefore built here, in the language of the UI, with the two command ids
+// pnidui expects - so the menu is pnidui's own, with pnidui's own handlers, and this mod
+// invents nothing. The hook answers one (module, resource) pair; every other LoadMenuW
+// of this process goes to the original untouched.
+typedef HMENU(WINAPI* LoadMenuW_t)(HINSTANCE, LPCWSTR);
+static LoadMenuW_t LoadMenuW_Original = nullptr;
+static int g_netMenuServed = 0;
+
+static HMENU BuildNetworkIconMenu() {
+    const UiLangId lang = DetectUiLang();
+    HMENU bar = CreateMenu();
+    HMENU popup = CreatePopupMenu();
+    if (!bar || !popup) {
+        if (bar) DestroyMenu(bar);
+        if (popup) DestroyMenu(popup);
+        return nullptr;
+    }
+    AppendMenuW(popup, MF_STRING, 3107, kNetTroubleshoot[lang]);
+    AppendMenuW(popup, MF_STRING, 3109, kNetOpenSettings[lang]);
+    AppendMenuW(bar, MF_POPUP | MF_STRING, (UINT_PTR)popup, L"");
+    return bar;
+}
+
+static HMENU WINAPI LoadMenuW_Hook(HINSTANCE hInstance, LPCWSTR lpMenuName) {
+    try {
+        const HMODULE pnidui = GetModuleHandleW(L"pnidui.dll");
+        if (pnidui && IS_INTRESOURCE(lpMenuName) && (HMODULE)hInstance == pnidui &&
+            (UINT)(ULONG_PTR)lpMenuName == 3014) {
+            HMENU menu = BuildNetworkIconMenu();
+            if (menu) {
+                if (g_netMenuServed < 3) {
+                    g_netMenuServed++;
+                    Wh_Log(L"[network] the menu of the network icon is handed to pnidui "
+                           L"(resource 3014: troubleshoot, network settings)");
+                }
+                return menu;
+            }
+            Wh_Log(L"[network] resource 3014 asked for, the menu could not be built");
+        }
+    } catch (...) {
+        Wh_Log(L"[network] exception while building the menu of the network icon");
+    }
+    return LoadMenuW_Original(hInstance, lpMenuName);
+}
+
+// The two entry points of the click are registered here, once, and only from
 // Wh_ModInit, together with every other hook of this mod (see the note there). Both shims
 // never forward a page to the shell: every ms-settings:network* and ms-availablenetworks:
 // target of this shell is answered with a request for the Windows 10 flyout and with a
@@ -2932,6 +2334,14 @@ static void InstallNetworkClickHooks() {
                L"pnidui itself calls");
     } else {
         Wh_Log(L"[init] ShellExecuteEx hooks unavailable: the click may reach the shell page");
+    }
+
+    if (Wh_SetFunctionHook((void*)LoadMenuW, (void*)LoadMenuW_Hook,
+                           (void**)&LoadMenuW_Original)) {
+        Wh_Log(L"[init] the menu resource of pnidui is served (LoadMenuW)");
+    } else {
+        Wh_Log(L"[init] LoadMenuW hook unavailable: the right click on the network icon "
+               L"stays without a menu");
     }
 }
 
@@ -3055,6 +2465,9 @@ namespace NetworkTrayForce { static void ShowNetworkIconMenuHere(HWND owner) noe
 // code; a member of a namespace is usable only after it has been declared, and the window
 // procedure comes first, so the declaration stands here, next to ShowNetworkIconMenuHere.
 namespace NetworkTrayForce { namespace BatteryFlyout { bool RequestBatteryFlyout() noexcept; } }
+// The battery branch of the window procedure below recognizes the click with the same
+// helper the battery takeover uses (it is defined with that takeover, further down).
+static bool BatteryIconClickIsOurs(UINT message, WPARAM wParam, LPARAM lParam) noexcept;
 static UINT NetworkMenuMessage() {
     static UINT message = RegisterWindowMessageW(L"Win10ExplorerRestorer.ShowNetworkMenu");
     return message;
@@ -3074,7 +2487,7 @@ static LRESULT NetworkIconSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
     try {
 
         if (msg == NetworkMenuMessage()) {
-            NetworkTrayForce::ShowNetworkIconMenuHere(hwnd);   // gira sul thread della barra
+            NetworkTrayForce::ShowNetworkIconMenuHere(hwnd);   // runs on the thread of the bar
             return 0;
         }
         // Right-click on the battery service window: intercept and show
@@ -3088,11 +2501,7 @@ static LRESULT NetworkIconSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         // Windows.Internal.ShellExperience.TrayBatteryFlyout). No page, no Win32 flyout, no
         // registry value.
         if (battery) {
-            const UINT event = LOWORD(lParam);   // NIN_* or WM_*
-            const bool leftClick = (msg == WM_LBUTTONUP || event == WM_LBUTTONUP ||
-                                    event == NIN_SELECT || event == NIN_KEYSELECT ||
-                                    msg == NIN_SELECT || msg == NIN_KEYSELECT);
-            if (leftClick) {
+            if (BatteryIconClickIsOurs(msg, wParam, lParam)) {
                 if (g_netClickLogs < 10) {
                     g_netClickLogs++;
                     wchar_t cls[64] = {};
@@ -3115,7 +2524,7 @@ static LRESULT NetworkIconSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             ShowBatteryMenu(hwnd);
             return 0;
         }
-        if (lParam == WM_RBUTTONUP || msg == WM_CONTEXTMENU) {
+        if (msg == WM_RBUTTONUP || msg == WM_CONTEXTMENU) {
             if (g_netClickLogs < 6) {
                 g_netClickLogs++;
                 wchar_t cls[64] = {};
@@ -3193,7 +2602,7 @@ static BOOL CALLBACK FindPniWindowProc(HWND w, LPARAM param) {
 
 static HWND FindPniHiddenWindow() {
     HWND found = nullptr;
-    EnumWindows(FindPniWindowProc, (LPARAM)&found);   // comprende le finestre invisibili
+    EnumWindows(FindPniWindowProc, (LPARAM)&found);   // includes the invisible windows
     if (found) return found;
 
     // fallback: should it ever be created as a message-only window
@@ -3258,7 +2667,7 @@ struct NetworkPniRegistration {
     bool hasGuid;
     bool valid;
     bool nativeFallbackRequired;
-    bool forced;                 // 1.0.0: registrazione creata dalla mod, non da pnidui
+    bool forced;                 // registration made by this mod, not by pnidui
     LONG generation;
 };
 
@@ -3425,7 +2834,7 @@ static void RecordNetworkPniRegistration(DWORD message, PNOTIFYICONDATAW data,
                 next.originalGuid = data->guidItem;
             }
             next.hasTip = CopyNotifyIconTipBounded(data, next.tip, _countof(next.tip));
-            next.forced = false;   // 1.0.0: registrazione nativa
+            next.forced = false;   // the registration is pnidui's own
             const bool nativeIconPresent = nativeResult != FALSE &&
                 (data->uFlags & NIF_ICON) != 0 && data->hIcon != nullptr;
             next.nativeFallbackRequired = !nativeIconPresent;
@@ -5510,9 +4919,7 @@ static BOOL WINAPI TrackPopupMenuEx_Hook(HMENU menu, UINT flags, int x, int y, H
 
     } catch (...) {
     }
-    const BOOL scelta = TrackPopupMenuEx_Original(menu, flags, x, y, owner, params);
-    if (scelta && HandleClassicMenuCommand((UINT)(UINT_PTR)scelta)) return FALSE;
-    return scelta;
+    return TrackPopupMenuEx_Original(menu, flags, x, y, owner, params);
 }
 
 static BOOL WINAPI TrackPopupMenu_Hook(HMENU menu, UINT flags, int x, int y, int reserved,
@@ -5523,9 +4930,7 @@ static BOOL WINAPI TrackPopupMenu_Hook(HMENU menu, UINT flags, int x, int y, int
 
     } catch (...) {
     }
-    const BOOL scelta = TrackPopupMenu_Original(menu, flags, x, y, reserved, owner, rect);
-    if (scelta && HandleClassicMenuCommand((UINT)(UINT_PTR)scelta)) return FALSE;
-    return scelta;
+    return TrackPopupMenu_Original(menu, flags, x, y, reserved, owner, rect);
 }
 
 static bool g_trackPopupMenuExHooked = false;
@@ -5565,6 +4970,10 @@ static const IID kIidClassFactory = {0x00000001, 0x0000, 0x0000,
 
 static bool TrayRedirectTarget(const wchar_t* moduleName, std::wstring& target) {
     if (!moduleName || !*moduleName) return false;
+    // With the tray modules switched off the Windows 10 copies must not be used by
+    // anything either - the setting used to stop the download only, and a store that was
+    // filled earlier kept having its DLLs loaded and every load of those names redirected.
+    if (!g_cfg.provideTrayDlls) return false;
 
     const wchar_t* base = moduleName;
     for (const wchar_t* p = moduleName; *p; p++)
@@ -5761,7 +5170,7 @@ static HRESULT WINAPI CoCreateInstance_Hook(REFCLSID clsid, LPUNKNOWN outer, DWO
     try {
         hr = CoCreateInstance_Original(clsid, outer, context, iid, ppv);
     } catch (...) {
-        Wh_Log(L"[tray/ribbon] original COM activation raised a C++ exception");
+        Wh_Log(L"[tray] original COM activation raised a C++ exception");
         return E_FAIL;  // Never activate twice after an exception.
     }
     if (networkSso) {
@@ -5796,7 +5205,7 @@ static bool EnsureCoCreateHook() noexcept {
         if (CoCreateInstance_Original) return true;
         return Wh_SetFunctionHook((void*)CoCreateInstance, (void*)CoCreateInstance_Hook,
                                   (void**)&CoCreateInstance_Original);
-    } catch (...) { Wh_Log(L"[ribbon] COM hook installation exception"); return false; }
+    } catch (...) { Wh_Log(L"[tray] COM hook installation exception"); return false; }
 }
 
 // The modules that draw the two icons of the restored tray: pnidui.dll is the
@@ -5880,8 +5289,8 @@ static HMODULE FindPrivateTrayModule(const wchar_t* moduleName) noexcept {
 static bool VerifyPinnedTrayFile(const wchar_t* moduleName) noexcept {
     try {
         if (!moduleName) return false;
-        const ExtraFile* pin = nullptr;
-        for (const ExtraFile& candidate : kTrayFiles) {
+        const PinnedFile* pin = nullptr;
+        for (const PinnedFile& candidate : kTrayFiles) {
             if (_wcsicmp(candidate.name, moduleName) == 0) {
                 pin = &candidate;
                 break;
@@ -5928,6 +5337,7 @@ static void ReportTrayStoreFile(const wchar_t* name) {
 
 static void LoadTrayModules(const wchar_t* why) {
     try {
+        if (!g_cfg.provideTrayDlls) return;   // see TrayRedirectTarget
         for (size_t i = 0; i < _countof(kTrayIconModules); ++i) {
             const wchar_t* name = kTrayIconModules[i];
             if (FindPrivateTrayModule(name)) continue;
@@ -6268,11 +5678,9 @@ static ULONGLONG g_nextGuaranteeTry = 0;
 static int g_verifyFailures = 0;
 static int g_publishCount = 0;
 
-// Stato del ripristino del pulsante di overflow e del flyout autentico.
-static std::atomic<bool> g_autoTrayRestored{false};
-// All'avvio la mod non tocca la barra. L'override virtuale e l'eventuale reset
-// di TrayNotify scattano solo se, dopo l'attesa, l'icona forzata non e' comparsa:
-// "menu overflow all'avvio" invariato.
+// State of the authentic flyout. At start-up the mod does not touch the bar: the possible
+// reset of TrayNotify fires only if, after the wait, the forced icon has not appeared
+// (the "notification overflow at start-up" behaviour is unchanged).
 static std::atomic<bool> g_escalate{false};
 static int g_clickLogNotes = 0;
 static ULONGLONG g_lastClickTick = 0;
@@ -6297,45 +5705,31 @@ static void NudgeTray() noexcept {
     }
 }
 
-// ----------------------------------------------- ripristino del chevron ----
-// EnableAutoTray=0 viene ora servito solo in memoria. Il valore fisico resta
-// intatto, quindi togliendo la risposta torna il comportamento normale dell'overflow.
-static bool PublishForcedRegistration() noexcept;   // definita piu' sotto
+static bool PublishForcedRegistration() noexcept;   // defined below
 
-
-static bool RestoreOverflowChevron() noexcept {
+// The two files this mod writes for itself (the tray-state backup and the marker that
+// says the reset already ran) are not part of the shared binary store: they belong to this
+// mod's own storage, the folder Windhawk removes together with the mod. The store folder is
+// shared with the Windows 10 taskbar mod and survives an uninstall, so it is used only when
+// the mod storage is not available.
+static bool ResolveStateDir(wchar_t* out, size_t count) noexcept {
     try {
-        ++g_restoreAttempts;
-        g_autoTrayVirtual.store(false, std::memory_order_release);
-        NudgeTray();
-        Wh_Log(L"[tray-force] virtual EnableAutoTray=0 removed (attempt %d): the overflow button \"^\" is available again", g_restoreAttempts);
-        return true;
+        wchar_t storage[MAX_PATH] = {};
+        if (Wh_GetModStoragePath(storage, _countof(storage)) && storage[0] &&
+            EnsureDirectory(storage)) {
+            wcsncpy_s(out, count, storage, _TRUNCATE);
+            return true;
+        }
     } catch (...) {
-        Wh_Log(L"[tray-force] exception while removing the virtual EnableAutoTray override");
-        return false;
+        Wh_Log(L"[tray-force] exception while resolving this mod's storage folder");
     }
+    if (!g_cfg.storePath[0]) return false;
+    wcsncpy_s(out, count, g_cfg.storePath, _TRUNCATE);
+    return true;
 }
 
-// L'icona e' sparita dopo il ripristino: si torna all'override virtuale.
-// Il pulsante di overflow resta nascosto, ma l'icona di rete ha la precedenza
-// (e' la richiesta principale); il log lo dice chiaramente.
-static void ReApplyAllIconsMode() noexcept {
-    try {
-        g_verifiedSince = 0;
-        g_autoTrayRestored.store(false);
-        g_autoTrayVirtual.store(true, std::memory_order_release);
-        NudgeTray();
-        PublishForcedRegistration();
-        if (g_restoreLogNotes++ < 3)
-            Wh_Log(L"[tray-force] with the real value the icon does not stay visible: "
-                   L"virtual \"all icons visible\" is active in the private shell "
-                   L"(the overflow button stays hidden while the icon is in forced mode)");
-    } catch (...) {
-    }
-}
-
-// Copia di sicurezza dello stato binario della barra di notifica e sua
-// cancellazione, una sola volta. Senza backup non si cancella nulla.
+// Backup of the binary state of the notification area and its deletion, once. Nothing is
+// deleted without a backup.
 static bool BackupAndResetTrayValuesOnce() noexcept {
     try {
         const wchar_t* kValues[] = { L"IconStreams", L"PastIconsStream" };
@@ -6345,9 +5739,16 @@ static bool BackupAndResetTrayValuesOnce() noexcept {
             !key.valid())
             return true;   // nulla da azzerare
 
+        wchar_t stateDir[MAX_PATH] = {};
+        if (!ResolveStateDir(stateDir, _countof(stateDir))) {
+            Wh_Log(L"[tray-force] no folder for this mod's state files: the tray state is left "
+                   L"as it is");
+            return false;
+        }
+
         wchar_t marker[MAX_PATH] = {};
         _snwprintf_s(marker, _countof(marker), _TRUNCATE, L"%s\\tray-state-reset.done",
-                     g_cfg.storePath);
+                     stateDir);
         if (GetFileAttributesW(marker) != INVALID_FILE_ATTRIBUTES) return true;
 
         // Solo per il percorso di backup: dump grezzo dei valori
@@ -6378,7 +5779,7 @@ static bool BackupAndResetTrayValuesOnce() noexcept {
 
         wchar_t backup[MAX_PATH] = {};
         _snwprintf_s(backup, _countof(backup), _TRUNCATE, L"%s\\tray-state-backup.bin",
-                     g_cfg.storePath);
+                     stateDir);
         {
             ScopedHandle file(CreateFileW(backup, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                                           FILE_ATTRIBUTE_NORMAL, nullptr));
@@ -6429,18 +5830,7 @@ static bool ApplyVisibilityGuarantees() noexcept {
         // EnableAutoTray e' solo virtuale. Si arma esattamente dove il vecchio
         // codice avrebbe scritto 0 al posto di un valore reale diverso o assente.
         if (g_escalate.load(std::memory_order_acquire)) {
-            if (!g_autoTrayRestored.load() &&
-                !g_autoTrayVirtual.load(std::memory_order_acquire)) {
-                DWORD enableAutoTray = 1;
-                if (!ReadRegDwordHkcu(kExplorerKey, L"EnableAutoTray", &enableAutoTray) ||
-                    enableAutoTray != 0) {
-                    g_autoTrayVirtual.store(true, std::memory_order_release);
-                    Wh_Log(L"[tray-force] escalation: virtual EnableAutoTray=0 to make the icon appear "
-                           L"(the real registry value is unchanged)");
-                }
-            }
-
-            // Stato binario della barra (con backup) - una sola volta, in escalation.
+            // Binary state of the bar (with a backup) - once, as the last escalation.
             if (g_cfg.forceNetworkTrayResetTraySettings)
                 BackupAndResetTrayValuesOnce();
         }
@@ -6453,8 +5843,7 @@ static bool ApplyVisibilityGuarantees() noexcept {
             Wh_Log(L"[tray-force] some visibility guarantees were not applied: "
                    L"new attempt in 30 s");
         } else {
-            Wh_Log(L"[tray-force] visibility guarantees applied (virtual all-icons mode, "
-                   L"optional tray state reset)");
+            Wh_Log(L"[tray-force] visibility guarantees applied (optional tray state reset)");
         }
         return ok;
     } catch (...) {
@@ -6531,7 +5920,7 @@ private:
     void* m_pointer = nullptr;
 };
 
-static bool QueryIconRect(const NetworkPniRegistration& reg, RECT* out) noexcept;   // definita sotto
+static bool QueryIconRect(const NetworkPniRegistration& reg, RECT* out) noexcept;   // defined below
 
 class ScopedFlyoutCom {
 public:
@@ -6722,14 +6111,14 @@ static void ShowNetworkIconMenuHere(HWND owner) noexcept {
         }
         SetForegroundWindow(menuOwner);
 
-        const BOOL scelta = static_cast<BOOL>(
+        const BOOL picked = static_cast<BOOL>(
             ImmersiveMenu::Track(menu, menuOwner, point.x, point.y, TPM_RIGHTBUTTON));
-        if (!scelta && g_networkMenuLogs++ < 3)
+        if (!picked && g_networkMenuLogs++ < 3)
             Wh_Log(L"[tray-force] TrackPopupMenuEx: no choice (error %lu)", GetLastError());
         DestroyMenu(menu);
         // Messaggio nullo che permette la chiusura corretta del menu (MSDN).
         PostMessageW(menuOwner, WM_NULL, 0, 0);
-        if (scelta) RunNetworkMenuAction(static_cast<UINT>(scelta));
+        if (picked) RunNetworkMenuAction(static_cast<UINT>(picked));
     } catch (...) {
         Wh_Log(L"[tray-force] exception in the network icon menu");
     }
@@ -7278,7 +6667,7 @@ static LRESULT BatteryClickSubclassProc(HWND hwnd, UINT message, WPARAM wParam, 
     try {
         if (BatteryIconClickIsOurs(message, wParam, lParam)) {
             const bool press = (LOWORD(lParam) == WM_LBUTTONDOWN || message == WM_LBUTTONDOWN);
-            if (press) return 0;   // la pressione appartiene al clic risposto qui sotto
+            if (press) return 0;   // the press belongs to the click answered below
             if (g_batteryClickLogs++ < 6) {
                 wchar_t cls[64] = {};
                 GetClassNameW(hwnd, cls, _countof(cls));
@@ -7286,7 +6675,7 @@ static LRESULT BatteryClickSubclassProc(HWND hwnd, UINT message, WPARAM wParam, 
                        L"shell does not see it, so nothing else can open", cls, g_batteryClickId);
             }
             BatteryFlyout::RequestBatteryFlyout();
-            return 0;   // consumato: niente pagina e niente flyout della shell
+            return 0;   // consumed: no page and no flyout of the shell
         }
         if (message == WM_NCDESTROY && hwnd == g_batteryClickWnd) {
             g_batteryClickWnd = nullptr;
@@ -7453,9 +6842,9 @@ static LRESULT CALLBACK OwnerWindowProc(HWND hwnd, UINT message, WPARAM wParam,
             if (event == WM_LBUTTONUP || event == NIN_SELECT || event == NIN_KEYSELECT)
                 OpenNativeNetworkFlyout(hwnd, L"left");
             else if (event == WM_RBUTTONUP || event == WM_CONTEXTMENU)
-                OpenNativeNetworkFlyout(hwnd, L"destro");   // menu di pnidui (stesse voci)
-            // WM_MOUSEMOVE / WM_LBUTTONDOWN / altro: nessuna azione (ma il log sopra c'e' gia',
-            // tranne per il mouse-move).
+                OpenNativeNetworkFlyout(hwnd, L"right");   // pnidui's own menu (same entries)
+            // WM_MOUSEMOVE / WM_LBUTTONDOWN / anything else: no action (the log above has
+            // already said what matters, apart from the mouse-move).
             return 0;
         }
         // Diagnosed via a live DbgView capture: on at least one system, a second, genuine
@@ -7508,19 +6897,48 @@ static LRESULT CALLBACK OwnerWindowProc(HWND hwnd, UINT message, WPARAM wParam,
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
+// The class belongs to this module, not to the host.
+//
+// It used to be registered with the instance of explorer.exe and with the result of
+// RegisterClassW ignored ("reuse the class if it is already there"). A class left behind by an
+// earlier load whose thread never reached its own UnregisterClassW - a timeout on unload, a
+// killed process - is exactly what must NOT be reused: its lpfnWndProc points into an image
+// that Windhawk has already unmapped, and the first message to the window jumps into freed
+// code. Registered under the module's own handle the class dies with the module instead, and a
+// collision is reported as the failure it is.
+static HINSTANCE OwnerClassInstance() {
+    HINSTANCE instance = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&OwnerWindowProc), &instance) ||
+        !instance) {
+        instance = GetModuleHandleW(nullptr);
+    }
+    return instance;
+}
+
 static DWORD WINAPI OwnerThreadProc(LPVOID) noexcept {
     HWND window = nullptr;
+    HINSTANCE instance = nullptr;
+    bool classRegistered = false;
     try {
+        instance = OwnerClassInstance();
         WNDCLASSW wc = {};
         wc.lpfnWndProc = OwnerWindowProc;
-        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hInstance = instance;
         wc.lpszClassName = kOwnerClass;
-        RegisterClassW(&wc);   // se e' gia' registrata la creazione usa quella
-        window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kOwnerClass, L"", WS_POPUP,
-                                 0, 0, 1, 1, nullptr, nullptr, wc.hInstance, nullptr);
-        if (!window)
-            Wh_Log(L"[tray-force] owner window not created (%lu): the forced icon "
-                   L"not possible", GetLastError());
+        if (!RegisterClassW(&wc)) {
+            Wh_Log(L"[tray-force] the window class of the forced icon could not be registered "
+                   L"(%lu): a class of this name is already there, the icon is not forced",
+                   GetLastError());
+        } else {
+            classRegistered = true;
+            window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kOwnerClass, L"",
+                                     WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, instance, nullptr);
+            if (!window)
+                Wh_Log(L"[tray-force] owner window not created (%lu): the forced icon "
+                       L"not possible", GetLastError());
+        }
         std::lock_guard<std::mutex> lock(g_ownerLock);
         g_ownerWindow = window;
         g_ownerThreadId = GetCurrentThreadId();
@@ -7543,7 +6961,9 @@ static DWORD WINAPI OwnerThreadProc(LPVOID) noexcept {
         g_ownerRunning = false;
     } catch (...) {
     }
-    UnregisterClassW(kOwnerClass, GetModuleHandleW(nullptr));
+    // Only the class this thread registered is taken away: one that another owner had
+    // registered before (the failure above) is not ours to destroy.
+    if (classRegistered && instance) UnregisterClassW(kOwnerClass, instance);
     return 0;
 }
 
@@ -7637,11 +7057,11 @@ static bool PublishForcedRegistration() noexcept {
         reg.id = kIconId;
         reg.callbackMessage = kCallbackMessage;
         reg.hasTip = BuildTipText(reg.tip, _countof(reg.tip));
-        reg.hasGuid = false;                 // il GUID viene applicato dal percorso NIM_ADD
-        reg.hasVersion = true;               // protocollo moderno: NIN_SELECT/NIN_KEYSELECT
+        reg.hasGuid = false;                 // the GUID is applied by the NIM_ADD path
+        reg.hasVersion = true;   // modern protocol: NIN_SELECT / NIN_KEYSELECT
         reg.version = NOTIFYICON_VERSION_4;
         reg.valid = true;
-        reg.nativeFallbackRequired = true;   // l'icona va disegnata dalla mod
+        reg.nativeFallbackRequired = true;   // the icon has to be drawn by the mod
         reg.forced = true;
         reg.generation = 0;
         {
@@ -7905,20 +7325,38 @@ static bool IsPrivateExplorerProcess() {
 
 // The Windows 10 shell is an explorer.exe that is not the system one.
 static bool IsLegacyShellProcess() {
-    wchar_t path[MAX_PATH] = {};
-    if (!GetModuleFileNameW(nullptr, path, _countof(path))) return false;
-    if (g_realExePath[0] == 0) wcscpy_s(g_realExePath, path);
-    if (IsPrivateExplorerProcess()) return true;
-    wchar_t systemRoot[MAX_PATH] = {};
-    const DWORD rootLength =
-        GetEnvironmentVariableW(L"SystemRoot", systemRoot, _countof(systemRoot));
-    if (!rootLength || rootLength >= _countof(systemRoot)) return false;
-    const size_t rootChars = wcslen(systemRoot);
-    const size_t pathChars = wcslen(path);
-    if (pathChars == rootChars + 13 && _wcsnicmp(path, systemRoot, rootChars) == 0 &&
-        _wcsicmp(path + rootChars, L"\explorer.exe") == 0) {
-        return false;
+    if (g_realExePath[0] == 0) {
+        wchar_t path[MAX_PATH] = {};
+        if (GetModuleFileNameW(nullptr, path, _countof(path))) wcscpy_s(g_realExePath, path);
     }
+    const wchar_t* path = g_realExePath;
+    if (!path[0]) return false;
+    if (IsPrivateExplorerProcess()) return true;
+
+    // The full path of the system shell is <Windows>\explorer.exe. GetWindowsDirectoryW is the
+    // documented source of <Windows>, with SystemRoot as a fallback. Note the doubled backslash
+    // below: "\explorer.exe" is the ESC escape sequence, such a literal never matches a path,
+    // and the mod would then run in the Windows 11 shell as well.
+    wchar_t windowsDir[MAX_PATH] = {};
+    DWORD dirChars = GetWindowsDirectoryW(windowsDir, _countof(windowsDir));
+    if (!dirChars || dirChars >= _countof(windowsDir)) {
+        dirChars = GetEnvironmentVariableW(L"SystemRoot", windowsDir, _countof(windowsDir));
+        if (!dirChars || dirChars >= _countof(windowsDir)) return false;
+    }
+    while (dirChars > 0 && windowsDir[dirChars - 1] == L'\\') {
+        windowsDir[--dirChars] = L'\0';
+    }
+
+    static constexpr wchar_t kSystemShellTail[] = L"\\explorer.exe";
+    const size_t pathChars = wcslen(path);
+    const bool isSystemShell =
+        pathChars == dirChars + (_countof(kSystemShellTail) - 1) &&
+        _wcsnicmp(path, windowsDir, dirChars) == 0 &&
+        _wcsicmp(path + dirChars, kSystemShellTail) == 0;
+    if (isSystemShell) return false;
+
+    // Any other explorer.exe is the private Windows 10 shell of the companion mod
+    // (win10-taskbar-on-win11-24h2), which lives in the store folder, not in <Windows>.
     return IsProcessImageName(path, L"explorer.exe");
 }
 
@@ -8217,17 +7655,20 @@ static bool PrepareTrayStore() {
     if (!EnsureDirectory(g_cfg.storePath)) return false;
 
     bool complete = true;
-    for (const ExtraFile& file : kTrayFiles) {
+    for (const PinnedFile& file : kTrayFiles) {
+        // The unload has priority over the store: what is not there yet is simply missing,
+        // and the next load of the mod starts from the files that survived on disk.
+        if (g_unloading.load(std::memory_order_acquire)) return false;
         if (!EnsureTrayStoreFile(file.name, file.symbolId, file.sha256)) complete = false;
     }
     // explorer.exe: the private Windows 10 shell itself. Same symbol-server entry and
     // same pin the Windows 10 taskbar mod uses, so the file and its locale folder are
     // shared with it: whoever needs it first downloads it, the other one finds it
     // verified and does not download it again.
-    if (g_cfg.provideTrayDlls) {
+    if (g_cfg.provideTrayDlls && !g_unloading.load(std::memory_order_acquire)) {
         wchar_t explorerPath[MAX_PATH] = {};
-        if (EnsureVerifiedFile(g_cfg.storePath, L"explorer.exe", kBuilds[0].symbolId,
-                               kBuilds[0].sha256, explorerPath, _countof(explorerPath))) {
+        if (EnsureVerifiedFile(g_cfg.storePath, kExplorerFile.name, kExplorerFile.symbolId,
+                               kExplorerFile.sha256, explorerPath, _countof(explorerPath))) {
             Wh_Log(L"[store] explorer.exe ready (%s)", explorerPath);
         } else {
             Wh_Log(L"[store] explorer.exe not available: the private shell cannot start until "
@@ -8250,6 +7691,46 @@ static HANDLE g_stopEvent = nullptr;
 static HANDLE g_servicesThread = nullptr;
 static DWORD g_trayThreadId = 0;
 
+// The retry of a failed download, with a backoff.
+//
+// A missing file used to be asked again on every tick of this thread, that is five times a
+// second: an offline machine, a proxy that blocks msdl.microsoft.com, a non-200 answer or the
+// HTML page of a captive portal meant a download attempt per tick, each one re-hashing the
+// files that are already in the store (explorer.exe among them). The first retry now waits a
+// minute and the wait doubles up to fifteen minutes; a settings change starts over at once.
+static constexpr DWORD kTrayStoreRetryBaseMs = 60000;
+static constexpr DWORD kTrayStoreRetryMaxMs = 15 * 60000;
+static ULONGLONG g_trayStoreNextTry = 0;
+static DWORD g_trayStoreRetryDelayMs = kTrayStoreRetryBaseMs;
+static int g_trayStoreFailures = 0;
+
+static void ResetTrayStoreBackoff() noexcept {
+    g_trayStoreNextTry = 0;
+    g_trayStoreRetryDelayMs = kTrayStoreRetryBaseMs;
+    g_trayStoreFailures = 0;
+}
+
+static bool TrayStoreAttemptIsDue() noexcept {
+    return GetTickCount64() >= g_trayStoreNextTry;
+}
+
+static void NoteTrayStoreAttempt(bool ok) noexcept {
+    if (ok) {
+        ResetTrayStoreBackoff();
+        return;
+    }
+    ++g_trayStoreFailures;
+    const ULONGLONG now = GetTickCount64();
+    g_trayStoreNextTry = now + g_trayStoreRetryDelayMs;
+    if (g_trayStoreRetryDelayMs < kTrayStoreRetryMaxMs) {
+        g_trayStoreRetryDelayMs *= 2;
+        if (g_trayStoreRetryDelayMs > kTrayStoreRetryMaxMs)
+            g_trayStoreRetryDelayMs = kTrayStoreRetryMaxMs;
+    }
+    Wh_Log(L"[store] attempt %d failed: the Windows 10 files are asked again in %lu s",
+           g_trayStoreFailures, (g_trayStoreRetryDelayMs / 1000));
+}
+
 static void TrayThreadWork(bool firstRun) {
     if (firstRun) {
         // Which process this is, in the terms the tray code uses: the private Windows 10
@@ -8265,9 +7746,16 @@ static void TrayThreadWork(bool firstRun) {
     // The DLLs come from this mod: downloaded if missing, verified against the pinned
     // SHA-256 (and signature) if present. Nothing is assumed to be already there.
     if (g_cfg.provideTrayDlls) {
-        PrepareTrayStore();
+        // While the backoff of a failed attempt is running the store is not asked again: the
+        // tray work goes on with whatever is on disk, without touching the network.
+        if (g_trayStoreReady || TrayStoreAttemptIsDue())
+            NoteTrayStoreAttempt(PrepareTrayStore());
     } else {
-        Wh_Log(L"[store] the tray modules are switched off by the settings");
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            Wh_Log(L"[store] the tray modules are switched off by the settings");
+        }
     }
 
     if (!g_traySupportInstalled) InstallTraySupport();
@@ -8318,7 +7806,9 @@ static DWORD WINAPI FlyoutServicesThread(LPVOID) {
     MSG queueInit = {};
     PeekMessageW(&queueInit, nullptr, 0, 0, PM_NOREMOVE);
 
-    LoadFlyoutSettings();
+    // The engine owns the settings while it is tearing the mod down: the thread has nothing to
+    // read any more, and a settings call here could be the last thing it does.
+    if (!g_unloading.load(std::memory_order_acquire)) LoadFlyoutSettings();
     try {
         TrayThreadWork(true);
     } catch (...) {
@@ -8330,6 +7820,7 @@ static DWORD WINAPI FlyoutServicesThread(LPVOID) {
         // 200 ms: the period of the tray ticks is unchanged, but unloading does not
         // wait for a long timeout when the stop event is already set.
         if (WaitForSingleObject(g_stopEvent, 200) == WAIT_OBJECT_0) break;
+        if (g_unloading.load(std::memory_order_acquire)) break;
         try {
             TrayThreadWork(false);
         } catch (...) {
@@ -8347,9 +7838,12 @@ static DWORD WINAPI FlyoutServicesThread(LPVOID) {
     // windows still pointed into this module when it was unloaded, so the next message to the
     // clock (which repaints every second) jumped into freed code and took explorer.exe with it.
     // No window procedure of the shell may outlive this module.
-    // La presa del clic sull'icona e' una sottoclasse di una finestra della shell: se
-    // restasse, il suo window procedure punterebbe dentro questo modulo quando viene
-    // scaricato. Si toglie per prima.
+    // The click takeover is a subclass on a window of the shell: left in place, its window
+    // procedure would point into this module once the module is unmapped. It is removed
+    // First.
+    // The backoff is this thread's own state: the next load of the mod starts from scratch.
+    ResetTrayStoreBackoff();
+
     NetworkTrayForce::DisarmNetworkIconClickSubclass();
     NetworkTrayForce::DisarmBatteryIconClickSubclass();
     // 1.4.0: the right-click supervision subclass on the pnidui/stobject service windows
@@ -8451,8 +7945,15 @@ namespace FlyoutHostPatch {
 
 static std::atomic<bool> g_patched{false};
 static std::atomic<int> g_logs{0};
-// 1.3.8 (A): il modulo e' stato fissato in memoria (GetModuleHandleEx_W con
-// GET_MODULE_HANDLE_EX_FLAG_PIN). Una volta per processo: il pin non si rifa' e non si annulla.
+// What this copy of the mod wrote, so that it can be given back. Only the bytes written by
+// this very instance are restored: a site that was already carrying them (the mod reloaded
+// on a settings change, or the shell loaded the module again) was not touched here and is
+// left as it is.
+static unsigned char g_savedBytes[80];
+static unsigned char* g_writtenAt = nullptr;
+static std::atomic<bool> g_canRestore{false};
+// The module has been pinned in memory (GetModuleHandleExW with
+// GET_MODULE_HANDLE_EX_FLAG_PIN). Once per process: a pin is not redone and not undone.
 static std::atomic<bool> g_pinned{false};
 
 // ---- ricerca nei byte: 'x' = byte esatto, '?' = qualunque -------------------
@@ -8534,12 +8035,12 @@ static const char kTargetMaskRelaxed[] = "xxxxxx?????xxx?xxxx?xx?xxxxx????xxxx"
                                          "x????xxxxxxx????????????xx????xxx?"
                                          "xxxx????xx";
 
-// Le due maschere descrivono lo stesso numero di byte del pattern: se una delle due righe non
-// regge, il file non compila.
-static_assert(sizeof(kTargetPattern) == sizeof(kTargetMask) - 1, "kTargetMask: 80 byte");
+// The two masks describe the same number of pattern bytes: if either line stops holding, the
+// file does not compile.
+static_assert(sizeof(kTargetPattern) == sizeof(kTargetMask) - 1, "kTargetMask: 80 bytes");
 static_assert(sizeof(kTargetPattern) == sizeof(kTargetMaskRelaxed) - 1,
-              "kTargetMaskRelaxed: 80 byte");
-static_assert(sizeof(kTargetMaskRelaxed) == sizeof(kTargetMask), "le due maschere: 81 byte");
+              "kTargetMaskRelaxed: 80 bytes");
+static_assert(sizeof(kTargetMaskRelaxed) == sizeof(kTargetMask), "the two masks: 81 bytes");
 
 // ===========================================================================
 // 1.3.8 (A) - IL MODULO FISSATO IN MEMORIA (documentazione Microsoft).
@@ -8680,14 +8181,17 @@ static void PatchQuickActionsTemplates(HMODULE module) noexcept {
             Wh_Log(L"[flyout-host] those bytes could not be changed (error %lu)", GetLastError());
             return;
         }
+        memcpy(g_savedBytes, target, sizeof(g_savedBytes));   // what Wh_ModBeforeUninit gives back
+        g_writtenAt = target;
         for (int i = 0; i < 5; ++i) target[6 + i] = 0x90;            // call LoadComponent
         memcpy(target + 52, source + 4, 8);                          // mov edx / lea rcx
         *reinterpret_cast<int*>(target + 74) =
             static_cast<int>(reinterpret_cast<long long>(getter) -
                              reinterpret_cast<long long>(target + 78));
-        writable.Restore();   // subito: la scrittura e' finita qui
+        writable.Restore();   // at once: the write is over here
         FlushInstructionCache(GetCurrentProcess(), target, 80);
         g_patched.store(true, std::memory_order_relaxed);
+        g_canRestore.store(true, std::memory_order_release);
         Wh_Log(L"[flyout-host] this process builds the flyouts with the Windows 10 template set "
                L"(written now, module 0x%p): the flyout is drawn and stays on screen, network and "
                L"battery", (void*)module);
@@ -8717,6 +8221,34 @@ static bool NameIsModuleNamed(const wchar_t* text, size_t length,
         if (a != b) return false;
     }
     return true;
+}
+
+// The 80 bytes this instance wrote, back as they were: the flyout of Windows 11 is built the
+// Windows 11 way again as soon as the mod is off. Restoring is the same kind of operation as
+// patching (the bytes of a running function are replaced and the instruction cache flushed),
+// so it carries no risk the patch did not carry. What cannot be taken back is the pin of the
+// module (see (A) above): the module stays loaded until the process ends, and the next
+// load of the mod re-patches whatever it finds.
+static void Uninstall() noexcept {
+    try {
+        if (!g_canRestore.exchange(false, std::memory_order_acq_rel)) return;
+        unsigned char* target = g_writtenAt;
+        g_writtenAt = nullptr;
+        if (!target) return;
+        ScopedWriteProtect writable(target, sizeof(g_savedBytes));
+        if (!writable) {
+            Wh_Log(L"[flyout-host] the original bytes could not be written back (error %lu)",
+                   GetLastError());
+            return;
+        }
+        memcpy(target, g_savedBytes, sizeof(g_savedBytes));
+        FlushInstructionCache(GetCurrentProcess(), target, sizeof(g_savedBytes));
+        g_patched.store(false, std::memory_order_relaxed);
+        Wh_Log(L"[flyout-host] the bytes of Windows.UI.QuickActions.dll were given back: this "
+               L"process builds the flyouts its own way again");
+    } catch (...) {
+        Wh_Log(L"[flyout-host] exception while giving the patched bytes back");
+    }
 }
 
 static bool NameIsQuickActions(const wchar_t* text, size_t length) noexcept {
@@ -8796,7 +8328,9 @@ BOOL Wh_ModInit() {
         // mod is loaded there as well, and in that process only the flyout-host patches (and
         // optionally the experimental square-corners hook) run: it is not the shell process,
         // and nothing else of the mod applies to it.
-        if (ImageNameIs(g_realExePath, L"ShellExperienceHost.exe")) {
+        // Is the running process this image? The flyout host belongs to another process, so
+        // the name of the image is what tells the two apart.
+        if (IsProcessImageName(g_realExePath, L"ShellExperienceHost.exe")) {
             Wh_Log(L"[flyout] ShellExperienceHost: only the flyout-host patches run here");
             // This process is the one that draws the flyout: it has to build it the Windows 10
             // way, otherwise the flyout it shows is torn down again after a moment.
@@ -8862,11 +8396,15 @@ BOOL Wh_ModInit() {
 // unloaded, and it closed the handles of a thread it had not seen exit.
 static bool JoinServicesThread(PCWSTR where) {
     if (!g_servicesThread) return true;
-    const ULONGLONG deadline = GetTickCount64() + 10000;
-    DWORD waited = WAIT_TIMEOUT;
-    while (GetTickCount64() < deadline) {
-        waited = WaitForSingleObject(g_servicesThread, 100);
-        if (waited == WAIT_OBJECT_0) break;
+    ULONGLONG nextNote = GetTickCount64() + 30000;
+    for (;;) {
+        if (WaitForSingleObject(g_servicesThread, 1000) == WAIT_OBJECT_0) return true;
+        const ULONGLONG now = GetTickCount64();
+        if (now >= nextNote) {
+            nextNote = now + 30000;
+            Wh_Log(L"[flyout] the services thread is still finishing its work (%s): the unload "
+                   L"waits for it, the module must not go away under a running thread", where);
+        }
     }
 }
 
@@ -8875,9 +8413,15 @@ void Wh_ModBeforeUninit() {
     // removes hooks": from the return of this callback on, no hook operation is allowed any
     // more, so the mod has to be quiet here already.
     g_unloading.store(true, std::memory_order_seq_cst);
+    // First the operations that can block: the join below has no timeout, so whatever the
+    // services thread is waiting on has to be released here.
+    CancelActiveDownload();
     ShellOpGuard::BeginShutdown();
     RestorePeekAtDesktopOnUnload();
-    RestorePniduiShellExecuteExIatOnUnload();
+    // The bytes written in ShellExperienceHost.exe by this copy of the mod are its own
+    // doing, and are given back before the image goes away. The module pin cannot be
+    // undone (no documented way exists); that is noted in the README and in the log.
+    FlyoutHostPatch::Uninstall();
     if (g_stopEvent) SetEvent(g_stopEvent);
     JoinServicesThread(L"Wh_ModBeforeUninit");
 }
@@ -8888,6 +8432,11 @@ void Wh_ModUninit() {
     // callback that blocks forever would hold the unload. The thread was stopped above, so
     // this is a bounded check that normally finds it already gone.
     const bool threadStopped = JoinServicesThread(L"Wh_ModUninit");
+    // The import table entry of pnidui is given back here, after every thread of this
+    // mod has really stopped - the owner window used to be able to take it over again from
+    // inside that window procedure, which would have left it pointing into the unloaded image.
+    // Wh_ModUninit still runs with the module mapped, so the hook it names is alive.
+    RestorePniduiShellExecuteExIatOnUnload();
     if (threadStopped) {
         if (g_servicesThread) {
             CloseHandle(g_servicesThread);
@@ -8907,6 +8456,9 @@ void Wh_ModUninit() {
 
 void Wh_ModSettingsChanged() {
     LoadFlyoutSettings();
+    // The user may have just switched the tray modules back on, or changed the timeout:
+    // A store that is still incomplete is tried again at once.
+    ResetTrayStoreBackoff();
     NetworkTrayForce::SettingsChanged();
     Wh_Log(L"[flyout] settings reloaded: tray modules=%s",
            g_cfg.provideTrayDlls ? L"on" : L"off");
