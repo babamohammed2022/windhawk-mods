@@ -990,10 +990,10 @@ struct Session {
 };
 static Session* g_session = nullptr;
 
-// Which scheme the menu uses. "Auto" follows the Windows app theme
-// (Settings > Personalization > Colors), "Light"/"Dark" force the Windows 10 light
-// or dark menu; the value comes from the skin's own Colour scheme setting, so the
-// win+X menu and the rest of the mod cannot disagree. Both colours sets are always
+// Which scheme the menus of this mod use: the right-click menu of the network icon and
+// the one of the battery icon. "auto" follows the Windows app theme (Settings >
+// Personalization > Colors, the AppsUseLightTheme value Explorer itself uses), "light"
+// and "dark" force the Windows 10 light or dark menu. Both colour sets are always
 // available: if the shell theme cannot be opened, the menu is painted with the
 // Windows 10 constants of the selected scheme instead of an unstyled popup.
 static bool IsLightTheme() noexcept {
@@ -4748,9 +4748,9 @@ static int WINAPI LoadStringW_Hook(HINSTANCE hInst, UINT id, LPWSTR buffer, int 
         const wchar_t* text = (moduleName[0] == L's')
                                   ? LookupTrayString(kStobjectStrings, _countof(kStobjectStrings), id)
                                   : LookupTrayString(kPniduiStrings, _countof(kPniduiStrings), id);
-        // Diagnostics: an id asked by a tray module and missing from the
-        // Windows 10 table as well. In the 0.3.3 log no "string served" lines
-        // appeared exactly because the ids involved were not in the table.
+        // Diagnostics: an id asked by a tray module and missing from the Windows 10
+        // table as well. Without this line the failure is silent, and an empty menu and
+        // a table that does not cover the id look exactly the same in the log.
         if (!text) {
             if (g_trayTextMisses < 8) {
                 g_trayTextMisses++;
