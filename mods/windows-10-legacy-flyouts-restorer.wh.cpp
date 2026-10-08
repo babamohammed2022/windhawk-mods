@@ -2048,13 +2048,16 @@ static bool HandleClassicMenuCommand(UINT id) {
     }
 }
 
-// --- language indicator fix: removed from this mod. It lives in the separate mod
-// "windows-10-language-flyout-guard"; the hooks it needed were never registered here.
-// --- network: guarded routing for non-PNI network launches --------------
-// the old generic workaround can still rewrite a network-settings launch from
-// another caller. A click delivered to pnidui's real PNIHiddenWnd is different:
-// PNI-origin URI fallbacks are blocked below, and the dynamic icon fallback
-// never installs its own click handler or launches a URI.
+// --- network: guarded routing for non-PNI network launches -------------------
+//
+// The old generic workaround can still rewrite a network-settings launch from another
+// caller. A click delivered to pnidui's real PNIHiddenWnd is different: the URI
+// fallbacks of this mod are blocked below, and the dynamic icon fallback never
+// installs its own click handler or launches a URI.
+//
+// The language-indicator fix that used to be described next to this one is not part of
+// this mod: it lives in the separate mod "windows-10-language-flyout-guard", and the
+// hooks it needed were never registered here.
 static const wchar_t* kNetworkSettingsUri = L"ms-settings:network";
 static const wchar_t* kNetworkFlyoutUri = L"ms-availablenetworks:";
 
@@ -3500,7 +3503,7 @@ static void InstallNetworkIconTrace() {
         Wh_Log(L"[network] tray icon registration tracking not installed");
 }
 
-// --- 8f) tray module strings: the MUI that is not in the data folder --------
+// --- tray module strings: the MUI that is not in the data folder --------------
 // evidence (stobject.dll 10.0.19041.7664, disassembled): stobject does NOT have
 // the strings inside itself (file resources: MUI, VERSION, MANIFEST) and takes
 // EVERY text with LoadStringW(hInstance, id, ...) from its MUI,
@@ -4782,7 +4785,7 @@ static void InstallTrayStrings() {
         Wh_Log(L"[tray] tray module strings not served (hook not installed)");
 }
 
-// --- 8f-bis) where the battery right-click menu comes from -------------------
+// --- where the battery right-click menu comes from ----------------------------
 // again from the disassembly: the battery menu is NOT a resource. stobject
 // builds CreatePopupMenu + InsertMenuItemW/AppendMenuW and takes the entries from
 // the registry:
@@ -4832,7 +4835,7 @@ static void LogBatteryMenuSource() {
     }
 }
 
-// --- 8g) the right-click menu: who really builds it --------------------------
+// --- the right-click menu: who really builds it --------------------------------
 // it separates the two cases the log did not tell apart for the battery
 // icon:
 //   a) the click does not reach stobject -> NO TrackPopupMenu line appears;
