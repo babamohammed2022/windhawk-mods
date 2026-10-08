@@ -539,7 +539,7 @@ static SigResult VerifyMicrosoftSignature(const wchar_t* path, bool* signerIsMic
         return SigResult::Bad;
     }
 
-    // Firmatario
+    // The signer of the file, read from the embedded certificate
     HCERTSTORE store = nullptr;
     HCRYPTMSG  msg = nullptr;
     if (CryptQueryObject(CERT_QUERY_OBJECT_FILE, path,
@@ -4848,13 +4848,13 @@ typedef BOOL(WINAPI* TrackPopupMenu_t)(HMENU, UINT, int, int, int, HWND, const R
 static TrackPopupMenu_t TrackPopupMenu_Original = nullptr;
 static int g_tpmLogs = 0;
 
-// Defined further below (WinRT diagnostics section): only the signature is needed here.
+// Defined further below (in the caller-logging block): only the signature is needed here.
 static void LogCallerModule(void* caller, wchar_t* buf, size_t count);
 
 // The real caller is not WhReturnAddress(): that one points inside our own
 // module (at the hook trampoline). The stack is walked and the first
-// frame that does not belong to the mod is taken (the 0.3.3 log always wrote
-// "local@win10-taskbar-clean...dll" in that column).
+// frame that does not belong to the mod is taken: an earlier revision wrote the
+// module of the mod itself in that column, which made every caller look local.
 static const wchar_t* RealCallerModule(wchar_t* buf, size_t count) {
     buf[0] = 0;
     void* frames[8] = {};
