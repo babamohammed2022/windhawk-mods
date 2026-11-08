@@ -2,7 +2,7 @@
 // @id              win8-charms-bar-recreation
 // @name            Windows 8/8.1 Charms Bar Recreation
 // @description     This mod recreates the Windows 8/8.1 Charms Bar on Windows 10 and Windows 11
-// @version         1.0.0
+// @version         1.1.0
 // @author 	        babamohammed
 // @github          https://github.com/babamohammed2022
 // @license         GPL-3.0
@@ -51,7 +51,9 @@ While a charm pane is open:
 - **Charms Bar enabled**: turns the Charms Bar on or off. Share is always included.
 - **In-mod language**: English, Italian, German, French, Spanish, Japanese, Portuguese, Russian, Chinese
   (Simplified) or Korean. The choice applies to the rail, the charm panes and the Project panel alike.
-- **Activation mode**: full right edge, top-right corner, Win+C, or combinations.
+- **Activation mode**: full right edge, top-right and bottom-right corners (default), top-right corner, Win+C, or combinations.
+- **Edge activation delay**: how long the pointer must stay in the activation zone (checked on pointer movement).
+- **Hide when the pointer moves away**: closes the Charms Bar shortly after the pointer leaves it.
 - **Hide after choosing a charm**: closes the Charms Bar after a charm is activated. Turn off to leave it open.
 - **Close on outside click or focus change**: light-dismiss behavior.
 - **Animate show and hide**: enables pane motion. Windows' own *Settings > Accessibility > Visual effects >
@@ -61,7 +63,7 @@ While a charm pane is open:
 - **Charms Bar icons**: Windows 8/8.1 icons, or the Windows 8 Build 8102 beta set for Search, Share, Devices and Settings. The Start logo is set separately.
 - **Enable rail transparency**: optional subtle rail transparency.
 - **Show clock and system status flyout**: shows or hides the clock and status flyout.
-- **Settings pane color**: system accent or dark background for the Settings, Devices and Share panes.
+- **Settings pane color**: system accent, dark, or a custom HEX color (for example #4617B4) for the Settings, Devices and Share panes.
 - **Settings charm**: recreated Windows 8-style pane or native Win+I.
 - **Search charm target**: automatic or Windows search. Automatic opens the companion
   *Windows 8/8.1 Search Charm Recreation* panel when that mod is installed, otherwise it sends the
@@ -112,15 +114,23 @@ Live system data (volume, brightness, network, battery) is read only while a pan
     - ru: Русский
     - zh: 中文(简体)
     - ko: 한국어
-- activationMode: edgeAndWinC
+- activationMode: cornersAndWinC
   $name: Activation mode
-  $description: "This setting chooses how the Charms Bar opens: from the full right edge, from the top-right corner, with Win+C, or with a combination of these."
+  $description: "This setting chooses how the Charms Bar opens: from the full right edge, from the right-hand corners (top-right and bottom-right, like Windows 8), with Win+C, or with a combination of these."
   $options:
+    - cornersAndWinC: Top-right + bottom-right corners + Win+C
+    - cornersOnly: Top-right + bottom-right corners only
     - edgeAndWinC: Full right edge + Win+C
     - edgeOnly: Full right edge only
     - topRightAndWinC: Top-right corner + Win+C
     - topRightOnly: Top-right corner only
     - winCOnly: Win+C only
+- edgeDelayMs: 250
+  $name: Edge activation delay (ms)
+  $description: "This setting sets how long (0-2000 ms) the pointer must stay in the activation zone before the Charms Bar opens. The delay is checked when the pointer moves. The CharmsBarDesktopDelay registry value, when present, still takes precedence."
+- hideOnMouseLeave: true
+  $name: Hide when the pointer moves away
+  $description: "This setting closes the Charms Bar shortly after the pointer leaves it, as in Windows 8/8.1. It applies only once the pointer has entered the bar, and never while a mouse button is held."
 - hideAfterClick: true
   $name: Hide after choosing a charm
   $description: "This setting closes the Charms Bar after you activate a charm. Turn it off to leave the rail open."
@@ -154,6 +164,10 @@ Live system data (volume, brightness, network, battery) is read only while a pan
   $options:
     - accent: System accent
     - dark: Dark
+    - custom: Custom color (HEX)
+- paneCustomColor: "#4617B4"
+  $name: Settings pane custom color
+  $description: "This setting sets the background of the Settings, Devices and Share panes when the pane color is Custom color. Use a HEX value such as #4617B4 (the original Windows 8.1 purple)."
 - settingsCharmMode: pane
   $name: Settings charm
   $description: "This setting chooses what the Settings charm opens: the recreated Windows 8-style Settings pane, or the native Windows Win+I experience."
@@ -3453,6 +3467,8 @@ constexpr UINT_PTR TIMER_VOLUME = 5;
 constexpr UINT_PTR TIMER_BRIGHTNESS_APPLY = 6;
 constexpr UINT_PTR TIMER_PANE_METRICS = 7;
 constexpr UINT_PTR TIMER_SEARCH_VERIFY = 8; // 700 ms after a Win chord: did the Windows search UI appear?
+constexpr UINT_PTR TIMER_DISMISS_POLL = 15;  // 100 ms: click-outside and pointer-leave fallback
+constexpr UINT_PTR TIMER_COMPANION_SEARCH_VERIFY = 16; // did the companion Search panel appear?
 constexpr UINT_PTR TIMER_START_VERIFY = 9;  // 900 ms after handing Start over: did that window appear?
 constexpr UINT_PTR TIMER_STARTTIP_DWELL = 10; // is the pointer still parked in the corner?
 constexpr UINT_PTR TIMER_STARTTIP_FRAME = 11; // 15 ms frame tick for the fade and the glint
@@ -3826,6 +3842,8 @@ std::atomic<bool> g_useWinC, g_edgeActivation, g_topRightCornerOnly, g_useAnimat
 std::atomic<bool> g_charmsEnabled, g_hideAfterClick;
 std::atomic<bool> g_showClock, g_showQuickMenu, g_fullHeight;
 std::atomic<bool> g_closeOnClickOutside;
+std::atomic<bool> g_hideOnMouseLeave, g_cornersBoth;
+std::atomic<COLORREF> g_paneCustomColor;
 std::atomic<int> g_opacity, g_openMs, g_closeMs, g_edgeDelay, g_startLogoStyle;
 // 0 = Windows 8/8.1 regular icons, 1 = Windows 8 Build 8102 beta icon set (Start logo excluded).
 std::atomic<int> g_charmIconSet{0};
@@ -3880,9 +3898,13 @@ int g_animDurationMs = 0;
 LONGLONG g_animStartQpc = 0, g_animQpcFrequency = 0;
 std::atomic<bool> g_edgeLatched, g_menuEdgeLatched, g_edgePosted;
 std::atomic<ULONGLONG> g_edgeSince;
+ULONGLONG g_charmsLeaveSince=0;
+bool g_dismissButtonsDown=false, g_charmsPointerEntered=false;
+DWORD g_charmsShownTick=0;
 std::wstring g_shareTitle, g_shareText;
 
 void HideVolumeFlyout();
+void RefreshEdgeUiRegistry();
 void HideVolumeTip();
 void RepositionVisibleVolumeFlyout();
 void HideMetroContextMenu(bool restoreFocus);
@@ -4007,6 +4029,7 @@ void ReadWindhawkSettings() {
     bool useWinC=true;
     bool edgeActivation=true;
     bool topRightCornerOnly=false;
+    bool cornersBoth=false;
     ScopedWhString activationMode(Wh_GetStringSetting(L"activationMode"));
     if(activationMode.get()) {
         if(wcscmp(activationMode.get(),L"edgeAndWinC")==0) {
@@ -4019,8 +4042,15 @@ void ReadWindhawkSettings() {
             useWinC=false; edgeActivation=true; topRightCornerOnly=true;
         } else if(wcscmp(activationMode.get(),L"winCOnly")==0) {
             useWinC=true; edgeActivation=false;
+        } else if(wcscmp(activationMode.get(),L"cornersAndWinC")==0) {
+            useWinC=true; edgeActivation=true; topRightCornerOnly=true; cornersBoth=true;
+        } else if(wcscmp(activationMode.get(),L"cornersOnly")==0) {
+            useWinC=false; edgeActivation=true; topRightCornerOnly=true; cornersBoth=true;
         }
+    } else {
+        useWinC=true; edgeActivation=true; topRightCornerOnly=true; cornersBoth=true;
     }
+    g_cornersBoth.store(cornersBoth);
     g_useWinC.store(useWinC);
     g_edgeActivation.store(edgeActivation);
     g_topRightCornerOnly.store(topRightCornerOnly);
@@ -4069,7 +4099,13 @@ void ReadWindhawkSettings() {
     ScopedWhString settingsMode(Wh_GetStringSetting(L"settingsCharmMode"));
     g_settingsPane.store(!(settingsMode.get() && wcscmp(settingsMode.get(),L"native")==0));
     ScopedWhString paneColor(Wh_GetStringSetting(L"paneColorMode"));
-    g_paneColorMode.store(paneColor.get() && wcscmp(paneColor.get(),L"dark")==0 ? 1 : 0);
+    int paneColorIndex=0;
+    if(paneColor.get() && wcscmp(paneColor.get(),L"dark")==0) paneColorIndex=1;
+    else if(paneColor.get() && wcscmp(paneColor.get(),L"custom")==0) paneColorIndex=2;
+    g_paneColorMode.store(paneColorIndex);
+    ScopedWhString paneCustom(Wh_GetStringSetting(L"paneCustomColor"));
+    g_paneCustomColor.store(DisplaySwitchMod::ParseHex(paneCustom.get(),RGB(70,23,180)));
+    g_hideOnMouseLeave.store(Wh_GetIntSetting(L"hideOnMouseLeave")!=0);
 
     // These controls were intentionally removed from the simplified settings UI. Keep the established
     // behavior with safe, predictable defaults.
@@ -4079,7 +4115,11 @@ void ReadWindhawkSettings() {
     g_opacity.store(g_enableTransparency.load()?210:255);
     g_openMs.store(300);
     g_closeMs.store(250);
-    g_edgeDelay.store(100);
+    {
+        int edgeDelay=Wh_GetIntSetting(L"edgeDelayMs");
+        if(edgeDelay<0||edgeDelay>2000) edgeDelay=250;
+        g_edgeDelay.store(edgeDelay);
+    }
 
     ScopedWhString startStyle(Wh_GetStringSetting(L"startLogoStyle"));
     int startStyleIndex=0;
@@ -4098,6 +4138,7 @@ void ReadWindhawkSettings() {
     if(g_clock) InvalidateRect(g_clock,nullptr,TRUE);
     if(g_volumeFlyout) InvalidateRect(g_volumeFlyout,nullptr,TRUE);
     if(g_threadId) PostThreadMessageW(g_threadId,WM_PORT_REFRESH,0,0);
+    RefreshEdgeUiRegistry();
 }
 
 // Read the system accent using the documented WinRT UISettings.GetColorValue API. DWM colorization is
@@ -4524,6 +4565,22 @@ void ClosePaneWindow(bool immediate);
 static bool CompanionStartScreenVisible();
 static void RaiseCharmsOverCompanionStartScreen();
 
+bool AnyMouseButtonDown() {
+    return (GetAsyncKeyState(VK_LBUTTON)&0x8000)||(GetAsyncKeyState(VK_RBUTTON)&0x8000)||
+           (GetAsyncKeyState(VK_MBUTTON)&0x8000);
+}
+
+// Fallback for the low-level mouse hook and the foreground event, either of which can be lost or miss a
+// click: a light 100 ms poll closes the rail or pane on an outside press and on pointer-leave.
+void ArmDismissPoll() {
+    if(!g_rail) return;
+    g_dismissButtonsDown=AnyMouseButtonDown();
+    g_charmsShownTick=GetTickCount();
+    g_charmsLeaveSince=0;
+    g_charmsPointerEntered=false;
+    SetTimer(g_rail,TIMER_DISMISS_POLL,100,nullptr);
+}
+
 void ShowCharms(POINT pt, bool byKeyboard) {
     if (!g_rail || !g_charmsEnabled.load()) return;
     if(g_paneVisible.load() || (g_pane && IsWindowVisible(g_pane))) {
@@ -4579,6 +4636,7 @@ void ShowCharms(POINT pt, bool byKeyboard) {
         Wh_Log(L"Charms Bar shown for the first time in this process (pid %lu)",
                GetCurrentProcessId());
     }
+    ArmDismissPoll();
 }
 
 void HideCharms(bool immediate = false) {
@@ -4918,7 +4976,20 @@ static bool TryOpenCompanionSearchPanel(const wchar_t* caller) {
     }
     Wh_Log(L"%s: opened the Windows 8/8.1 Search Charm Recreation panel (hwnd 0x%p, WM_APP+1)",
            caller,(void*)panel);
+    if(g_rail) {
+        KillTimer(g_rail,TIMER_COMPANION_SEARCH_VERIFY);
+        SetTimer(g_rail,TIMER_COMPANION_SEARCH_VERIFY,500,nullptr);
+    }
     return true;
+}
+
+// Heuristic for "Search fails on the first click": if the companion panel is still hidden 500 ms after the
+// toggle, send the toggle once more. Never repeated, and skipped when the panel is already visible.
+static void VerifyCompanionSearchPanel() {
+    const HWND panel=FindCompanionSearchPanel();
+    if(!panel || CompanionSearchPanelOpen(panel)) return;
+    if(PostMessageW(panel,kCompanionSearchToggle,0,0))
+        Wh_Log(L"Search charm: companion panel still hidden after 500 ms; toggle re-sent once");
 }
 
 // ---------------------------------------------------------------- companion Start Screen mod
@@ -5497,6 +5568,7 @@ LRESULT CALLBACK StartTipProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
 }
 
 static void ShowStartTip() {
+    return;
     if(g_startTipShown.load() || StartTipSuppressed()) return;
     if(!g_startTip || !IsWindow(g_startTip)) {
         if(g_startTip) Wh_Log(L"the Start tip window is gone; not showing it");
@@ -7229,8 +7301,10 @@ COLORREF EnsureReadableWithWhite(COLORREF c) {
 }
 
 COLORREF GetPaneBackground() {
-    return g_paneColorMode.load()==1 ? RGB(31,31,31) :
-           EnsureReadableWithWhite(g_accent.load());
+    const int mode=g_paneColorMode.load();
+    if(mode==1) return RGB(31,31,31);
+    if(mode==2) return g_paneCustomColor.load();
+    return EnsureReadableWithWhite(g_accent.load());
 }
 
 bool GetDefaultAudioEndpointVolume(ComPtr<IAudioEndpointVolume>& volume) {
@@ -7690,7 +7764,7 @@ void ClosePaneWindow(bool immediate) {
     const int distance=std::abs(g_paneAnimToOffset-g_paneAnimFromOffset);
     g_paneAnimDurationMs=(std::max)(80,(int)std::lround(g_closeMs.load()*(double)distance/(std::max)(1,full)));
     g_paneContentFromOffset=g_paneContentOffset;
-    g_paneContentToOffset=DpiScale(16);
+    g_paneContentToOffset=0; // on close the content travels with the pane, without an extra shift
     g_paneContentDurationMs=g_paneAnimDurationMs;
     // Same cached-frame slide as the opening animation, so leaving Settings is as smooth as entering it.
     BuildPaneSlideCache(g_pane);
@@ -7725,7 +7799,9 @@ bool ShowCharmPane(int kind) {
     g_paneAnimFromOffset=full;
     g_paneAnimToOffset=0;
     g_paneAnimDurationMs=(std::max)(80,(int)g_openMs.load());
-    g_paneContentFromOffset=animate?DpiScale(16):0;
+    // Same as the Search charm: the inner content starts 160 px to the right of the pane and arrives 1.5x
+    // later, which gives the Windows 8.1 parallax.
+    g_paneContentFromOffset=animate?DpiScale(160):0;
     g_paneContentToOffset=0;
     g_paneContentDurationMs=animate?(std::max)(80,g_paneAnimDurationMs*3/2):0;
     g_paneAnimOffset=animate?g_paneAnimFromOffset:0;
@@ -7754,6 +7830,7 @@ bool ShowCharmPane(int kind) {
             RefreshSettingsPaneMetrics();
         }
     }
+    ArmDismissPoll();
     return true;
 }
 
@@ -9020,6 +9097,67 @@ LRESULT PaintMenuWindow(HWND hwnd) {
     }
 }
 
+static bool PointInWindowRect(HWND w,POINT p,int pad=0) {
+    if(!w || !IsWindowVisible(w)) return false;
+    RECT r{};
+    if(!GetWindowRect(w,&r)) return false;
+    InflateRect(&r,pad,pad);
+    return PtInRect(&r,p)!=FALSE;
+}
+
+bool PointInCharmsRail(POINT p) {
+    return PointInWindowRect(g_rail,p,DpiScale(2)) || PointInWindowRect(g_clock,p,DpiScale(2)) ||
+           PointInWindowRect(g_menu,p,DpiScale(2));
+}
+
+bool PointInPaneSurfaces(POINT p) {
+    if(PointInWindowRect(g_pane,p,DpiScale(2)) || PointInWindowRect(g_volumeFlyout,p,DpiScale(2)) ||
+       PointInWindowRect(g_volumeTip,p,DpiScale(2)) || PointInWindowRect(g_clock,p,DpiScale(2)) ||
+       PointInWindowRect(g_menu,p,DpiScale(2))) return true;
+    HWND w=WindowFromPoint(p);
+    if(!w) return false;
+    HWND root=GetAncestor(w,GA_ROOTOWNER);
+    return root==g_pane || root==g_volumeFlyout || root==g_volumeTip || root==g_clock || root==g_menu;
+}
+
+void PollCharmsDismiss() {
+    const bool rail=g_visible.load();
+    const bool pane=g_paneVisible.load();
+    if(!rail && !pane) {
+        if(g_rail) KillTimer(g_rail,TIMER_DISMISS_POLL);
+        g_charmsLeaveSince=0;
+        return;
+    }
+    const bool down=AnyMouseButtonDown();
+    const bool newPress=down && !g_dismissButtonsDown;
+    g_dismissButtonsDown=down;
+    POINT p{};
+    if(!GetCursorPos(&p)) return;
+    const bool settled=(DWORD)(GetTickCount()-g_charmsShownTick)>300;
+    const bool outsideDismiss=g_closeOnClickOutside.load();
+    if(rail) {
+        const bool inside=PointInCharmsRail(p);
+        if(newPress && !inside && outsideDismiss && settled) {
+            PostThreadMessageW(g_threadId,WM_PORT_CLOSE,0,0);
+            return;
+        }
+        if(g_hideOnMouseLeave.load() && !down) {
+            if(inside) { g_charmsPointerEntered=true; g_charmsLeaveSince=0; }
+            else if(g_charmsPointerEntered && settled) {
+                const ULONGLONG now=GetTickCount64();
+                if(!g_charmsLeaveSince) g_charmsLeaveSince=now;
+                else if(now-g_charmsLeaveSince>=400) {
+                    g_charmsLeaveSince=0;
+                    PostThreadMessageW(g_threadId,WM_PORT_CLOSE,0,0);
+                    return;
+                }
+            }
+        } else if(down) g_charmsLeaveSince=0;
+    }
+    if(pane && newPress && outsideDismiss && settled && !g_paneMenuOpen && !PointInPaneSurfaces(p))
+        PostThreadMessageW(g_threadId,WM_PORT_PANECLOSE,0,0);
+}
+
 void UpdateAnimation() {
     if (!g_rail || g_animQpcFrequency <= 0 || g_animDurationMs <= 0) return;
     LARGE_INTEGER now{};
@@ -9053,6 +9191,11 @@ LRESULT CALLBACK RailProcImpl(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         case WM_PAINT: return PaintRailWindow(hwnd);
         case WM_TIMER:
             if (wp == TIMER_ANIMATION) UpdateAnimation();
+            else if (wp == TIMER_DISMISS_POLL) PollCharmsDismiss();
+            else if (wp == TIMER_COMPANION_SEARCH_VERIFY) {
+                KillTimer(hwnd,TIMER_COMPANION_SEARCH_VERIFY);
+                VerifyCompanionSearchPanel();
+            }
             else if (wp == TIMER_SEARCH_VERIFY) {
                 KillTimer(hwnd,TIMER_SEARCH_VERIFY);
                 VerifySearchChord();
@@ -9379,9 +9522,14 @@ LRESULT CALLBACK MouseProcImpl(int code,WPARAM wp,LPARAM lp) {
                     const bool inTopRightZone=p.y<=mi.rcMonitor.top+DpiScale(40);
                     const bool atBottom=p.y>=mi.rcMonitor.bottom-DpiScale(2);
                     const bool cornerOnly=g_topRightCornerOnly.load();
-                    const bool validActivationZone=!cornerOnly||inTopRightZone;
-                    const bool blockedCorner=((cornerOnly?inTopRightZone:atTopEdge) && g_disableTRCorner.load()) ||
-                                             (atBottom && g_disableBRCorner.load());
+                    const bool inBottomRightZone=p.y>=mi.rcMonitor.bottom-DpiScale(40);
+                    const bool cornersBoth=g_cornersBoth.load();
+                    const bool validActivationZone=!cornerOnly||inTopRightZone||(cornersBoth&&inBottomRightZone);
+                    const bool blockedCorner=cornersBoth ?
+                        ((inTopRightZone && g_disableTRCorner.load()) ||
+                         (inBottomRightZone && g_disableBRCorner.load())) :
+                        (((cornerOnly?inTopRightZone:atTopEdge) && g_disableTRCorner.load()) ||
+                         (atBottom && g_disableBRCorner.load()));
                     const bool noHint=g_disableCharmsHint.load();
                     const ULONGLONG now=GetTickCount64();
                     HWND foreground=GetForegroundWindow();
@@ -9971,7 +10119,7 @@ void ReturnToCharmsBarFromDisplaySwitch() {
 // "secondary" Explorer process and stays idle: it starts a supervisor thread instead, which waits for this
 // process to own the shell window and then starts the Charms Bar. The supervisor also retries a failed
 // startup instead of giving up, so the mod recovers by itself after an Explorer restart.
-constexpr PCWSTR kModVersion=L"1.0.0";
+constexpr PCWSTR kModVersion=L"1.1.0";
 // Assigned explicitly in Wh_ModInit/StartSupervisorIfNeeded, like the other atomics in this file, so builds
 // whose standard library omits value-taking atomic constructors keep working.
 std::atomic<bool> g_charmsServicesStarted;
@@ -10450,4 +10598,3 @@ void Wh_ModUninit() {
     WhTool_ModUninit();
     ExitProcess(0);
 }
-
